@@ -748,7 +748,7 @@ test('analysis refuses changes that exceed the model input window without sendin
   assert.equal(sent, 0);
 });
 
-test('re-downloading the review keeps saved analysis results', async t => {
+test('re-downloading the review keeps saved analysis results by default', async t => {
   const { repo } = await fixture(t);
   await rebuildBranchReview(repo, 'main', 'origin/feature/not-fetched', () => {});
   const directory = path.join(branchReviewRoot(repo), 'results');
@@ -756,6 +756,16 @@ test('re-downloading the review keeps saved analysis results', async t => {
   await fs.writeFile(path.join(directory, 'saved.md'), 'report');
   await rebuildBranchReview(repo, 'main', 'origin/feature/not-fetched', () => {});
   assert.equal(await fs.readFile(path.join(directory, 'saved.md'), 'utf8'), 'report');
+});
+
+test('re-downloading the review can delete saved analysis results when requested', async t => {
+  const { repo } = await fixture(t);
+  await rebuildBranchReview(repo, 'main', 'origin/feature/not-fetched', () => {});
+  const directory = path.join(branchReviewRoot(repo), 'results');
+  await fs.mkdir(directory, { recursive: true });
+  await fs.writeFile(path.join(directory, 'saved.md'), 'report');
+  await rebuildBranchReview(repo, 'main', 'origin/feature/not-fetched', () => {}, undefined, false);
+  await assert.rejects(fs.access(directory), { code: 'ENOENT' });
 });
 
 test('analysis sends all relevant files in three focused calls and saves three reports', async t => {

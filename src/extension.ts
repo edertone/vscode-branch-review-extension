@@ -545,7 +545,24 @@ async function handleDownload(
 
   webview.postMessage({ type: "busy", busy: true });
   try {
-    log(`Downloading baseline "${branches[0]}"`);
+    const existingReview = await readBranchReview(repoRoot);
+    const existingResults = existingReview.valid
+      ? await listAnalysisResults(repoRoot)
+      : [];
+    let preserveResults = true;
+    if (existingResults.length > 0) {
+      const choice = await vscode.window.showWarningMessage(
+        "Saved analysis results already exist for the downloaded branches.",
+        {
+          modal: true,
+          detail: "Delete the existing analysis results when downloading the selected branches again?",
+        },
+        "Delete Results",
+        "Keep Results",
+      );
+      preserveResults = choice !== "Delete Results";
+    }
+
     log(`Downloading baseline "${branches[0]}"`);
     const review = await rebuildBranchReview(
       repoRoot,
@@ -563,6 +580,7 @@ async function handleDownload(
         );
         return choice === "Use Local Data";
       },
+      preserveResults,
     );
     const summary = `Downloaded baseline "${review.baseline.branch}" and target "${review.target.branch}" to ${path.join(repoRoot, BRANCH_REVIEW_DIR)}`;
     output?.appendLine(summary);

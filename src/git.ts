@@ -498,6 +498,7 @@ export async function rebuildBranchReview(
   targetBranch: string,
   log: Logger,
   confirmFallback?: ConfirmFetchFallback,
+  preserveResults = true,
 ): Promise<BranchReviewData> {
   const finalRoot = branchReviewRoot(repoRoot);
   const stagingRoot = await fs.mkdtemp(path.join(repoRoot, `${BRANCH_REVIEW_DIR}.stage-`));
@@ -508,7 +509,9 @@ export async function rebuildBranchReview(
     const baseline = await downloadBranch(repoRoot, baselineBranch, 'baseline', log, stagingRoot, confirmFallback);
     const target = await downloadBranch(repoRoot, targetBranch, 'target', log, stagingRoot, confirmFallback);
     await generateAiReviewBundle(repoRoot, baseline, target, log, stagingRoot);
-    await preserveAnalysisResults(finalRoot, stagingRoot);
+    if (preserveResults) {
+      await preserveAnalysisResults(finalRoot, stagingRoot);
+    }
 
     try {
       await fs.rename(finalRoot, backupRoot);
