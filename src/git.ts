@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 export const BRANCH_REVIEW_DIR = '.branchReview';
+export const RESULTS_DIR = 'results';
 const REMOTE = 'origin';
 const MAX_FILE_DIFF_BYTES = 256 * 1024;
 const MAX_TOTAL_DIFF_BYTES = 20 * 1024 * 1024;
@@ -478,6 +479,18 @@ export async function generateAiReviewBundle(
   }
 }
 
+/** Copies previous analysis results into the new review so re-downloading keeps them. */
+async function preserveAnalysisResults(previousRoot: string, stagingRoot: string): Promise<void> {
+  const source = path.join(previousRoot, RESULTS_DIR);
+  try {
+    await fs.cp(source, path.join(stagingRoot, RESULTS_DIR), { recursive: true });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw err;
+    }
+  }
+}
+
 /** Builds a complete review in a sibling directory, then replaces .branchReview. */
 export async function rebuildBranchReview(
   repoRoot: string,
@@ -495,6 +508,7 @@ export async function rebuildBranchReview(
     const baseline = await downloadBranch(repoRoot, baselineBranch, 'baseline', log, stagingRoot, confirmFallback);
     const target = await downloadBranch(repoRoot, targetBranch, 'target', log, stagingRoot, confirmFallback);
     await generateAiReviewBundle(repoRoot, baseline, target, log, stagingRoot);
+    await preserveAnalysisResults(finalRoot, stagingRoot);
 
     try {
       await fs.rename(finalRoot, backupRoot);

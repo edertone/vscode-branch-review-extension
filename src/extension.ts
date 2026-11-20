@@ -1,7 +1,14 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import {
+  listAnalysisResults,
+  resultsRoot,
+  runAnalysis,
+} from "./analysis";
+import { ANALYSIS_PROFILES, findAnalysisProfile } from "./analysisProfiles";
+import {
   BRANCH_REVIEW_DIR,
+  RESULTS_DIR,
   clearBranchReview,
   getCurrentBranchName,
   listBranches,
@@ -11,6 +18,13 @@ import {
 
 const DEFAULT_BASELINE_BRANCH = "develop";
 const VIEW_ID = "branchReview.view";
+const MODEL_STATE_KEY = "branchReview.analysis.modelId";
+const MAX_GUIDE_CHARS = 20_000;
+const RESULT_ID_PATTERN = /^[0-9A-Za-z-]+$/;
+
+function guideStateKey(profileId: string): string {
+  return `branchReview.analysis.guide.${profileId}`;
+}
 
 interface GitRepository {
   rootUri: vscode.Uri;
@@ -30,7 +44,11 @@ type WebviewMessage =
   | { type: "ready" }
   | { type: "refresh" }
   | { type: "download"; baseline: string; target: string }
-  | { type: "clear" };
+  | { type: "clear" }
+  | { type: "analyze"; profileId: string; modelId: string; guide: string }
+  | { type: "cancelAnalysis" }
+  | { type: "resetGuide"; profileId: string }
+  | { type: "openResult"; id: string };
 
 let output: vscode.OutputChannel | undefined;
 
@@ -113,11 +131,14 @@ function resolveView(
   let folderWatcher: vscode.FileSystemWatcher | undefined;
   let folderChangeTimer: ReturnType<typeof setTimeout> | undefined;
   let refreshFolderAfterAction = false;
+  let analysisController: AbortController | undefined;
+  let analysisStateRevision = 0;
   const viewSubscriptions: vscode.Disposable[] = [];
 
   const disposeView = () => {
     if (disposed) return;
     disposed = true;
+    analysisController?.abort();
     folderWatcher?.dispose();
     if (folderChangeTimer) clearTimeout(folderChangeTimer);
     for (const subscription of viewSubscriptions) {
@@ -127,6 +148,21 @@ function resolveView(
   context.subscriptions.push({ dispose: disposeView });
   viewSubscriptions.push(currentView.onDidDispose(disposeView));
 
+  const postAnalysisState = () => {
+    if (!currentRepo || disposed) return;
+    const repoRoot = currentRepo.rootUri.fsPath;
+    const currentStateRevision = ++analysisStateRevision;
+    void buildAnalysisState(context, repoRoot).then(
+      (state) => {
+        if (!disposed && currentStateRevision === analysisStateRevision) {
+          void webview.postMessage(state);
+        }
+      },
+      (err: Error) => {
+        output?.appendLine(`Error reading analysis state: ${err.message}`);
+      },
+    );
+  };
   const syncReviewState = () => {
     if (!currentRepo) return;
     if (busy) {
@@ -139,6 +175,7 @@ function resolveView(
       (review) => {
         if (!disposed && selectedRevision === revision) {
           void webview.postMessage({ type: "reviewState", review });
+          postAnalysisState();
         }
       },
       (err: Error) => {
@@ -184,6 +221,7 @@ function resolveView(
       selectedRepo,
       () => !disposed && selectedRevision === revision,
     );
+    postAnalysisState();
   };
   const selectRepository = (selectedRepo: GitRepository) => {
     if (busy) {
@@ -249,6 +287,10 @@ function resolveView(
   );
 
   viewSubscriptions.push(
+    vscode.lm.onDidChangeChatModels(() => postAnalysisState()),
+  );
+
+  viewSubscriptions.push(
     currentView.onDidChangeVisibility(() => {
       if (currentView.visible) {
         syncReviewState();
@@ -287,6 +329,22 @@ function resolveView(
             );
           },
         );
+      } else if (message.type === "cancelAnalysis") {
+        analysisController?.abort();
+      } else if (message.type === "resetGuide") {
+        if (!findAnalysisProfile(message.profileId)) return;
+        void context.workspaceState
+          .update(guideStateKey(message.profileId), undefined)
+          .then(postAnalysisState);
+      } else if (message.type === "openResult") {
+        if (currentRepo) {
+          void openAnalysisReport(currentRepo.rootUri.fsPath, message.id);
+        }
+      } else if (message.type === "analyze" && busy) {
+        void webview.postMessage({
+          type: "analysisError",
+          text: "Another Branch Review operation is running. Wait for it to finish, then analyze.",
+        });
       } else if (!busy) {
         if (!currentRepo) {
           void webview.postMessage({
@@ -295,29 +353,46 @@ function resolveView(
           });
           return;
         }
-        busy = true;
         const repoRoot = currentRepo.rootUri.fsPath;
-        const action =
+        if (message.type === "analyze") {
+          const controller = new AbortController();
+          analysisController = controller;
+          void webview.postMessage({ type: "analysisRunning", running: true });
+          runExclusive(() =>
+            handleAnalyze(context, webview, message, repoRoot, controller.signal).finally(() => {
+              analysisController = undefined;
+              void webview.postMessage({ type: "analysisRunning", running: false });
+            }),
+          );
+          return;
+        }
+        runExclusive(() =>
           message.type === "refresh"
             ? refreshBranches(webview, repoRoot)
             : message.type === "clear"
               ? handleClear(webview, repoRoot)
-              : handleDownload(webview, message, repoRoot);
-        void action.finally(() => {
-          busy = false;
-          if (pendingRepo) {
-            const selectedRepo = pendingRepo;
-            pendingRepo = undefined;
-            selectRepository(selectedRepo);
-          } else if (refreshFolderAfterAction) {
-            refreshFolderAfterAction = false;
-            syncReviewState();
-          }
-        });
+              : handleDownload(webview, message, repoRoot),
+        );
       }
     }),
   );
   webview.html = getHtml(webview);
+
+  function runExclusive(action: () => Promise<void>): void {
+    busy = true;
+    void action().finally(() => {
+      busy = false;
+      postAnalysisState();
+      if (pendingRepo) {
+        const selectedRepo = pendingRepo;
+        pendingRepo = undefined;
+        selectRepository(selectedRepo);
+      } else if (refreshFolderAfterAction) {
+        refreshFolderAfterAction = false;
+        syncReviewState();
+      }
+    });
+  }
 }
 
 async function initializePanel(
@@ -380,7 +455,7 @@ async function handleClear(
   repoRoot: string,
 ): Promise<void> {
   const confirm = await vscode.window.showWarningMessage(
-    "Delete the .branchReview folder and all downloaded branches?",
+    "Delete the .branchReview folder, all downloaded branches, and saved analysis results?",
     { modal: true },
     "Delete",
   );
@@ -472,6 +547,150 @@ async function handleDownload(
   }
 }
 
+async function listChatModels(): Promise<vscode.LanguageModelChat[]> {
+  try {
+    return await vscode.lm.selectChatModels();
+  } catch (err) {
+    output?.appendLine(`Unable to list AI models: ${(err as Error).message}`);
+    return [];
+  }
+}
+
+async function buildAnalysisState(
+  context: vscode.ExtensionContext,
+  repoRoot: string,
+): Promise<Record<string, unknown>> {
+  const models = await listChatModels();
+  return {
+    type: "analysisState",
+    models: models.map((model) => ({
+      id: model.id,
+      name: model.name,
+      vendor: model.vendor,
+    })),
+    selectedModelId: context.workspaceState.get<string>(MODEL_STATE_KEY),
+    profiles: ANALYSIS_PROFILES.map((profile) => ({
+      id: profile.id,
+      label: profile.label,
+      defaultGuide: profile.guide,
+      guide: context.workspaceState.get<string>(guideStateKey(profile.id)) ?? profile.guide,
+    })),
+    results: await listAnalysisResults(repoRoot),
+  };
+}
+
+async function sendToModel(
+  model: vscode.LanguageModelChat,
+  prompt: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const source = new vscode.CancellationTokenSource();
+  const cancel = () => source.cancel();
+  signal.addEventListener("abort", cancel);
+  if (signal.aborted) {
+    source.cancel();
+  }
+  try {
+    const response = await model.sendRequest(
+      [vscode.LanguageModelChatMessage.User(prompt)],
+      {},
+      source.token,
+    );
+    let text = "";
+    for await (const fragment of response.text) {
+      text += fragment;
+    }
+    return text;
+  } finally {
+    signal.removeEventListener("abort", cancel);
+    source.dispose();
+  }
+}
+
+async function handleAnalyze(
+  context: vscode.ExtensionContext,
+  webview: vscode.Webview,
+  message: Extract<WebviewMessage, { type: "analyze" }>,
+  repoRoot: string,
+  signal: AbortSignal,
+): Promise<void> {
+  const fail = (text: string) => {
+    output?.appendLine(`Analysis error: ${text}`);
+    webview.postMessage({ type: "analysisError", text });
+  };
+  const profile = findAnalysisProfile(message.profileId);
+  if (!profile) {
+    return fail("Choose a valid code profile.");
+  }
+  const guide = typeof message.guide === "string" ? message.guide : "";
+  if (!guide.trim()) {
+    return fail("The analysis guide cannot be empty.");
+  }
+  if (guide.length > MAX_GUIDE_CHARS) {
+    return fail(`The analysis guide cannot be longer than ${MAX_GUIDE_CHARS} characters.`);
+  }
+  const chatModel = (await listChatModels()).find(
+    (model) => model.id === message.modelId,
+  );
+  if (!chatModel) {
+    return fail("The selected AI model is not available. Choose another model and try again.");
+  }
+
+  const guideCustomized = guide.trim() !== profile.guide.trim();
+  await context.workspaceState.update(MODEL_STATE_KEY, chatModel.id);
+  await context.workspaceState.update(
+    guideStateKey(profile.id),
+    guideCustomized ? guide : undefined,
+  );
+
+  output?.appendLine(`Analysis started: ${profile.label} profile with ${chatModel.name}`);
+  try {
+    const meta = await runAnalysis({
+      repoRoot,
+      profile,
+      guide,
+      guideCustomized,
+      model: {
+        id: chatModel.id,
+        name: chatModel.name,
+        maxInputTokens: chatModel.maxInputTokens,
+      },
+      signal,
+      sendPrompt: (prompt, promptSignal) => sendToModel(chatModel, prompt, promptSignal),
+      onProgress: (text) => {
+        output?.appendLine(text);
+        webview.postMessage({ type: "analysisProgress", text });
+      },
+    });
+    const text = `Analysis saved to ${path.join(BRANCH_REVIEW_DIR, RESULTS_DIR, meta.reportFile)}`;
+    output?.appendLine(text);
+    webview.postMessage({ type: "analysisDone", text });
+  } catch (err) {
+    if (signal.aborted) {
+      output?.appendLine("Analysis cancelled.");
+      webview.postMessage({ type: "analysisProgress", text: "Analysis cancelled." });
+      return;
+    }
+    fail((err as Error).message);
+  }
+}
+
+async function openAnalysisReport(repoRoot: string, id: string): Promise<void> {
+  if (!RESULT_ID_PATTERN.test(id)) {
+    vscode.window.showErrorMessage("Branch Review: invalid analysis result id.");
+    return;
+  }
+  const reportPath = path.join(resultsRoot(repoRoot), `${id}.md`);
+  try {
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(reportPath));
+    await vscode.window.showTextDocument(document, { preview: false });
+  } catch (err) {
+    vscode.window.showErrorMessage(
+      `Branch Review: unable to open analysis report: ${(err as Error).message}`,
+    );
+  }
+}
+
 function getHtml(webview: vscode.Webview): string {
   const nonce = getNonce();
   return /* html */ `<!DOCTYPE html>
@@ -525,6 +744,15 @@ function getHtml(webview: vscode.Webview): string {
     .modal-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; }
     .modal-actions .secondary { margin-left: 0; }
     .modal-actions-end { display: flex; align-items: center; gap: 8px; }
+    #analysisPanel select, #analysisPanel textarea { margin-top: 4px; }
+    #analysisGuide { box-sizing: border-box; width: 100%; min-height: 260px; resize: vertical; padding: 6px 8px; font-family: var(--vscode-editor-font-family); font-size: 12px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); outline: none; }
+    #analysisGuide:focus { border-color: var(--vscode-focusBorder); }
+    #analysisActions { display: flex; flex-wrap: wrap; gap: 8px; }
+    #analysisActions button { margin: 12px 0 0; }
+    #analysisStatus { margin-top: 12px; white-space: pre-wrap; font-size: 12px; }
+    #analysisResults { margin-top: 8px; }
+    .result-row { padding: 8px 0; border-bottom: 1px solid var(--vscode-panel-border); overflow-wrap: anywhere; }
+    .result-row button { margin: 4px 0 0; }
   </style>
 </head>
 <body>
@@ -540,7 +768,23 @@ function getHtml(webview: vscode.Webview): string {
     <button id="branchesTab" type="button" role="tab" aria-selected="false" aria-controls="branchesPanel" tabindex="-1">Downloaded branches</button>
   </div>
   <div id="reviewPanels">
-    <section id="analysisPanel" role="tabpanel" aria-labelledby="analysisTab" tabindex="0" hidden></section>
+    <section id="analysisPanel" role="tabpanel" aria-labelledby="analysisTab" tabindex="0" hidden>
+      <h3>Analyze changes</h3>
+      <label for="analysisModel">AI model</label>
+      <select id="analysisModel" aria-label="AI model" disabled></select>
+      <label for="analysisProfile">Code profile</label>
+      <select id="analysisProfile" aria-label="Code profile" disabled></select>
+      <label for="analysisGuide">Analysis guide for this profile (editable)</label>
+      <textarea id="analysisGuide" spellcheck="false" disabled></textarea>
+      <div id="analysisActions">
+        <button id="analyze" type="button" disabled>Analyze</button>
+        <button id="cancelAnalysis" class="secondary" type="button" hidden>Cancel analysis</button>
+        <button id="resetGuide" class="secondary" type="button" disabled>Restore default guide</button>
+      </div>
+      <div id="analysisStatus" class="muted" aria-live="polite"></div>
+      <h3 style="margin-top: 24px;">Results</h3>
+      <div id="analysisResults" class="muted"></div>
+    </section>
     <section id="branchesPanel" role="tabpanel" aria-labelledby="branchesTab" tabindex="0" hidden>
       <h3>Downloaded review data</h3>
       <div id="reviewDetails"></div>
@@ -602,13 +846,25 @@ function getHtml(webview: vscode.Webview): string {
     const targetBranches = document.getElementById('targetBranches');
     const status = document.getElementById('status');
     const modalStatus = document.getElementById('modalStatus');
+    const analysisModel = document.getElementById('analysisModel');
+    const analysisProfile = document.getElementById('analysisProfile');
+    const analysisGuide = document.getElementById('analysisGuide');
+    const analyzeButton = document.getElementById('analyze');
+    const cancelAnalysisButton = document.getElementById('cancelAnalysis');
+    const resetGuideButton = document.getElementById('resetGuide');
+    const analysisStatus = document.getElementById('analysisStatus');
+    const analysisResults = document.getElementById('analysisResults');
     let isBusy = false;
     let isLoading = true;
     let isRefreshing = false;
+    let isAnalysisRunning = false;
     let baselineEdited = false;
     let targetEdited = false;
     let hasValidReview = false;
     let activeReviewTab = 'analysis';
+    let analysisProfiles = [];
+    let analysisModels = [];
+    const analysisDrafts = {};
 
     function selectReviewTab(tab) {
       activeReviewTab = tab;
@@ -686,15 +942,141 @@ function getHtml(webview: vscode.Webview): string {
     function updateDownloadState() {
       const base = baseline.value.trim();
       const head = target.value.trim();
-      button.disabled = isBusy || isLoading || isRefreshing || !base || !head || base === head;
-      refreshButton.disabled = isBusy || isLoading || isRefreshing;
-      clearButton.disabled = isBusy || isLoading || isRefreshing;
-      chooseButton.disabled = isBusy || isLoading || isRefreshing;
-      baselineBranches.disabled = isBusy || isLoading || isRefreshing;
-      targetBranches.disabled = isBusy || isLoading || isRefreshing;
-      baseline.disabled = isBusy || isLoading || isRefreshing;
-      target.disabled = isBusy || isLoading || isRefreshing;
+      button.disabled = isBusy || isLoading || isRefreshing || isAnalysisRunning || !base || !head || base === head;
+      refreshButton.disabled = isBusy || isLoading || isRefreshing || isAnalysisRunning;
+      clearButton.disabled = isBusy || isLoading || isRefreshing || isAnalysisRunning;
+      chooseButton.disabled = isBusy || isLoading || isRefreshing || isAnalysisRunning;
+      baselineBranches.disabled = isBusy || isLoading || isRefreshing || isAnalysisRunning;
+      targetBranches.disabled = isBusy || isLoading || isRefreshing || isAnalysisRunning;
+      baseline.disabled = isBusy || isLoading || isRefreshing || isAnalysisRunning;
+      target.disabled = isBusy || isLoading || isRefreshing || isAnalysisRunning;
+      updateAnalysisState();
     }
+
+    function updateAnalysisState() {
+      const unavailable = isBusy || isLoading || isRefreshing || isAnalysisRunning;
+      const hasModel = analysisModels.length > 0 && analysisModel.value !== '';
+      const hasGuide = analysisGuide.value.trim() !== '';
+      analysisModel.disabled = unavailable || analysisModels.length === 0;
+      analysisProfile.disabled = unavailable;
+      analysisGuide.disabled = unavailable;
+      resetGuideButton.disabled = unavailable;
+      analyzeButton.disabled = unavailable || !hasValidReview || !hasModel || !hasGuide;
+      cancelAnalysisButton.hidden = !isAnalysisRunning;
+    }
+
+    function currentAnalysisProfile() {
+      return analysisProfiles.find(profile => profile.id === analysisProfile.value);
+    }
+
+    function showProfileGuide() {
+      const profile = currentAnalysisProfile();
+      const guide = profile ? (analysisDrafts[profile.id] ?? profile.guide) : '';
+      if (analysisGuide.value !== guide) {
+        analysisGuide.value = guide;
+      }
+      updateAnalysisState();
+    }
+
+    function renderAnalysisState(state) {
+      analysisModels = state.models;
+      const previousModel = analysisModel.value;
+      analysisModel.replaceChildren();
+      if (state.models.length === 0) {
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = 'No AI models available. Sign in to GitHub Copilot or another model provider.';
+        analysisModel.appendChild(placeholder);
+      }
+      for (const model of state.models) {
+        const option = document.createElement('option');
+        option.value = model.id;
+        option.textContent = model.name + ' (' + model.vendor + ')';
+        analysisModel.appendChild(option);
+      }
+      const preferredModel = [previousModel, state.selectedModelId]
+        .find(id => id && state.models.some(model => model.id === id));
+      analysisModel.value = preferredModel || (state.models[0] ? state.models[0].id : '');
+
+      analysisProfiles = state.profiles;
+      const previousProfile = analysisProfile.value;
+      analysisProfile.replaceChildren();
+      for (const profile of state.profiles) {
+        const option = document.createElement('option');
+        option.value = profile.id;
+        option.textContent = profile.label;
+        analysisProfile.appendChild(option);
+      }
+      analysisProfile.value = state.profiles.some(profile => profile.id === previousProfile)
+        ? previousProfile
+        : (state.profiles[0] ? state.profiles[0].id : '');
+      showProfileGuide();
+
+      analysisResults.replaceChildren();
+      if (state.results.length === 0) {
+        analysisResults.textContent = 'No analyses yet. Results are saved in .branchReview/results.';
+        return;
+      }
+      for (const result of state.results) {
+        const row = document.createElement('div');
+        row.className = 'result-row';
+        const info = document.createElement('div');
+        const skipped = result.skippedFiles.length
+          ? ' · ' + result.skippedFiles.length + ' not analyzed'
+          : '';
+        info.textContent = result.profileLabel + ' · ' + result.target.branch + ' vs ' + result.baseline.branch +
+          ' · ' + result.model.name + ' · ' + new Date(result.createdAt).toLocaleString() +
+          ' · ' + result.analyzedFiles + ' of ' + result.relevantFiles + ' files' + skipped +
+          (result.guideCustomized ? ' · edited guide' : '');
+        const open = document.createElement('button');
+        open.className = 'secondary';
+        open.type = 'button';
+        open.textContent = 'Open report';
+        open.addEventListener('click', () => {
+          vscode.postMessage({ type: 'openResult', id: result.id });
+        });
+        row.appendChild(info);
+        row.appendChild(open);
+        analysisResults.appendChild(row);
+      }
+    }
+
+    analysisProfile.addEventListener('change', showProfileGuide);
+    analysisModel.addEventListener('change', updateAnalysisState);
+    analysisGuide.addEventListener('input', () => {
+      const profile = currentAnalysisProfile();
+      if (profile) {
+        analysisDrafts[profile.id] = analysisGuide.value;
+      }
+      updateAnalysisState();
+    });
+    analyzeButton.addEventListener('click', () => {
+      const profile = currentAnalysisProfile();
+      if (!profile || analyzeButton.disabled) {
+        return;
+      }
+      analysisStatus.className = 'muted';
+      analysisStatus.textContent = 'Starting analysis...';
+      vscode.postMessage({
+        type: 'analyze',
+        profileId: profile.id,
+        modelId: analysisModel.value,
+        guide: analysisGuide.value,
+      });
+    });
+    cancelAnalysisButton.addEventListener('click', () => {
+      vscode.postMessage({ type: 'cancelAnalysis' });
+    });
+    resetGuideButton.addEventListener('click', () => {
+      const profile = currentAnalysisProfile();
+      if (!profile) {
+        return;
+      }
+      delete analysisDrafts[profile.id];
+      analysisGuide.value = profile.defaultGuide;
+      updateAnalysisState();
+      vscode.postMessage({ type: 'resetGuide', profileId: profile.id });
+    });
 
     function populateBranches(branches) {
       for (const list of [baselineBranches, targetBranches]) {
@@ -831,6 +1213,29 @@ function getHtml(webview: vscode.Webview): string {
         case 'reviewState':
           renderReview(message.review);
           updateDownloadState();
+          break;
+        case 'analysisState':
+          renderAnalysisState(message);
+          break;
+        case 'analysisRunning':
+          isAnalysisRunning = message.running;
+          if (message.running) {
+            analysisStatus.className = 'muted';
+            analysisStatus.textContent = 'Starting analysis...';
+          }
+          updateDownloadState();
+          break;
+        case 'analysisProgress':
+          analysisStatus.className = 'muted';
+          analysisStatus.textContent = message.text;
+          break;
+        case 'analysisDone':
+          analysisStatus.className = 'muted';
+          analysisStatus.textContent = message.text;
+          break;
+        case 'analysisError':
+          analysisStatus.className = 'error';
+          analysisStatus.textContent = message.text;
           break;
       }
     });

@@ -14,6 +14,8 @@ const {
   readBranchReview,
   rebuildBranchReview
 } = require('../out/git');
+const { findAnalysisProfile } = require('../out/analysisProfiles');
+const { listAnalysisResults, resultsRoot, runAnalysis } = require('../out/analysis');
 
 function git(cwd, ...args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -313,7 +315,8 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
     'clear', 'refresh', 'chooseBranches', 'cancel', 'project', 'reviewSummary', 'status',
     'modalStatus', 'modalTitle', 'analysisTab', 'branchesTab', 'analysisPanel', 'branchesPanel',
     'reviewTabs', 'reviewDetails', 'changedFiles', 'noReview',
-    'selectionModal', 'form'
+    'selectionModal', 'form', 'analysisModel', 'analysisProfile', 'analysisGuide', 'analyze',
+    'cancelAnalysis', 'resetGuide', 'analysisStatus', 'analysisResults'
   ]) {
     elements.set(id, element(id));
   }
@@ -394,6 +397,10 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
       onDidChangeActiveTextEditor(callback) { editorListener = callback; return { dispose() {} }; }
     },
     workspace: { createFileSystemWatcher: () => watcher },
+    lm: {
+      selectChatModels: async () => [],
+      onDidChangeChatModels: () => ({ dispose() {} })
+    },
     RelativePattern: class {
       constructor(base, pattern) { this.base = base; this.pattern = pattern; }
     },
@@ -417,7 +424,7 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
   } finally {
     Module._load = originalLoad;
   }
-  extension.activate({ subscriptions: [] });
+  extension.activate({ subscriptions: [], workspaceState: { get: () => undefined, update: async () => {} } });
   t.after(() => viewDisposed?.());
   await command();
   await command();
@@ -560,4 +567,135 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
   assert.equal(elements.get('modalTitle').textContent, 'Choose branches — seed');
   assert.equal(elements.get('target').value, 'origin/feature/not-fetched');
   assert.notEqual(elements.get('baseline').value, 'custom/base');
+});
+
+test('analysis sends only profile-relevant changes and stores the report', async t => {
+  const { repo, seed } = await fixture(t);
+  await fs.mkdir(path.join(seed, 'src'), { recursive: true });
+  await fs.writeFile(path.join(seed, 'src', 'user.service.ts'), 'export class UserService {}\n');
+  git(seed, 'add', 'src');
+  git(seed, 'commit', '-m', 'add service');
+  git(seed, 'push', 'origin', 'feature/not-fetched');
+  await rebuildBranchReview(repo, 'main', 'origin/feature/not-fetched', () => {});
+
+  const prompts = [];
+  const meta = await runAnalysis({
+    repoRoot: repo,
+    profile: findAnalysisProfile('angular'),
+    guide: 'Custom guide',
+    guideCustomized: true,
+    model: { id: 'fake', name: 'Fake model' },
+    signal: new AbortController().signal,
+    sendPrompt: async prompt => { prompts.push(prompt); return '## Summary\nLooks fine.'; },
+    onProgress() {}
+  });
+  assert.equal(prompts.length, 1);
+  assert.ok(prompts[0].includes('src/user.service.ts'));
+  assert.ok(prompts[0].includes('Custom guide'));
+  assert.ok(!prompts[0].includes('file.txt'));
+  assert.equal(meta.relevantFiles, 1);
+  assert.deepEqual(meta.skippedFiles, []);
+
+  const [saved] = await listAnalysisResults(repo);
+  assert.equal(saved.id, meta.id);
+  assert.match(await fs.readFile(path.join(resultsRoot(repo), meta.reportFile), 'utf8'), /Looks fine\./);
+
+  await assert.rejects(runAnalysis({
+    repoRoot: repo,
+    profile: findAnalysisProfile('java'),
+    guide: 'guide',
+    guideCustomized: false,
+    model: { id: 'fake', name: 'Fake model' },
+    signal: new AbortController().signal,
+    sendPrompt: async () => 'unused',
+    onProgress() {}
+  }), /No changed files match the Java profile/);
+});
+
+test('cancelling an analysis stops before saving a report', async t => {
+  const { repo, seed } = await fixture(t);
+  await fs.mkdir(path.join(seed, 'src'), { recursive: true });
+  await fs.writeFile(path.join(seed, 'src', 'app.component.ts'), 'export class App {}\n');
+  git(seed, 'add', 'src');
+  git(seed, 'commit', '-m', 'add component');
+  git(seed, 'push', 'origin', 'feature/not-fetched');
+  await rebuildBranchReview(repo, 'main', 'origin/feature/not-fetched', () => {});
+
+  const controller = new AbortController();
+  await assert.rejects(runAnalysis({
+    repoRoot: repo,
+    profile: findAnalysisProfile('angular'),
+    guide: 'guide',
+    guideCustomized: false,
+    model: { id: 'fake', name: 'Fake model' },
+    signal: controller.signal,
+    sendPrompt: async () => { controller.abort(); return 'partial'; },
+    onProgress() {}
+  }), /Analysis cancelled/);
+  assert.deepEqual(await listAnalysisResults(repo), []);
+});
+
+test('analysis refuses changes that exceed the model input window without sending', async t => {
+  const { repo, seed } = await fixture(t);
+  await fs.mkdir(path.join(seed, 'src'), { recursive: true });
+  await fs.writeFile(path.join(seed, 'src', 'big.component.ts'), `${'// change\n'.repeat(2000)}`);
+  git(seed, 'add', 'src');
+  git(seed, 'commit', '-m', 'add big component');
+  git(seed, 'push', 'origin', 'feature/not-fetched');
+  await rebuildBranchReview(repo, 'main', 'origin/feature/not-fetched', () => {});
+
+  let sent = 0;
+  await assert.rejects(runAnalysis({
+    repoRoot: repo,
+    profile: findAnalysisProfile('angular'),
+    guide: 'guide',
+    guideCustomized: false,
+    model: { id: 'small', name: 'Small model', maxInputTokens: 1000 },
+    signal: new AbortController().signal,
+    sendPrompt: async () => { sent++; return 'unused'; },
+    onProgress() {}
+  }), /too large for Small model in one request/);
+  assert.equal(sent, 0);
+});
+
+test('re-downloading the review keeps saved analysis results', async t => {
+  const { repo } = await fixture(t);
+  await rebuildBranchReview(repo, 'main', 'origin/feature/not-fetched', () => {});
+  const directory = path.join(branchReviewRoot(repo), 'results');
+  await fs.mkdir(directory, { recursive: true });
+  await fs.writeFile(path.join(directory, 'saved.md'), 'report');
+  await rebuildBranchReview(repo, 'main', 'origin/feature/not-fetched', () => {});
+  assert.equal(await fs.readFile(path.join(directory, 'saved.md'), 'utf8'), 'report');
+});
+
+test('analysis sends all relevant files in one request and saves one report', async t => {
+  const { repo, seed } = await fixture(t);
+  await fs.mkdir(path.join(seed, 'src'), { recursive: true });
+  for (const name of ['a', 'b', 'c', 'd']) {
+    await fs.writeFile(path.join(seed, 'src', `${name}.component.ts`), `// ${name}\n`);
+  }
+  git(seed, 'add', 'src');
+  git(seed, 'commit', '-m', 'add components');
+  git(seed, 'push', 'origin', 'feature/not-fetched');
+  await rebuildBranchReview(repo, 'main', 'origin/feature/not-fetched', () => {});
+
+  const prompts = [];
+  const meta = await runAnalysis({
+    repoRoot: repo,
+    profile: findAnalysisProfile('angular'),
+    guide: 'guide',
+    guideCustomized: false,
+    model: { id: 'fake', name: 'Fake model' },
+    signal: new AbortController().signal,
+    sendPrompt: async prompt => { prompts.push(prompt); return 'single response'; },
+    onProgress() {}
+  });
+  assert.equal(prompts.length, 1);
+  for (const name of ['a', 'b', 'c', 'd']) {
+    assert.ok(prompts[0].includes(`src/${name}.component.ts`));
+  }
+  assert.equal(meta.batches, 1);
+  assert.equal(meta.analyzedFiles, 4);
+  const report = await fs.readFile(path.join(resultsRoot(repo), meta.reportFile), 'utf8');
+  assert.match(report, /single response/);
 });

@@ -32,11 +32,23 @@ The selected branches are written to role-based folders, regardless of their bra
 - `commits.json`: commits reachable from target but not baseline.
 - `context/`: selected small project README and manifest files from target.
 
-The comparison is a direct tree diff from baseline to target; it does not infer age from branch names or commit dates and is not a merge-base comparison. Renames are represented as deletions and additions. The commit list contains only target-only history; shallow clones can make history counts and the list incomplete. Large diffs and commit lists are capped, with truncation recorded in the bundle; use the snapshots or recorded Git objects to investigate omitted content. Snapshots do not contain submodule contents, symlinks may point outside the snapshots, and Git LFS, checkout filters, or platform checkout behavior can affect snapshot contents. Uncommitted changes are excluded. Each download builds the complete review in a staging folder and replaces `.branchReview/` only after all branch snapshots and review data have been generated. This removes stale files and preserves the previous valid folder if building the replacement fails. The extension treats the folder as the source of truth; if its required files are missing or invalid, the branch-selection modal opens automatically. The AI bundle is generated locally; the extension does not send repository contents to an AI service.
+The comparison is a direct tree diff from baseline to target; it does not infer age from branch names or commit dates and is not a merge-base comparison. Renames are represented as deletions and additions. The commit list contains only target-only history; shallow clones can make history counts and the list incomplete. Large diffs and commit lists are capped, with truncation recorded in the bundle; use the snapshots or recorded Git objects to investigate omitted content. Snapshots do not contain submodule contents, symlinks may point outside the snapshots, and Git LFS, checkout filters, or platform checkout behavior can affect snapshot contents. Uncommitted changes are excluded. Each download builds the complete review in a staging folder and replaces `.branchReview/` only after all branch snapshots and review data have been generated. This removes stale files and preserves the previous valid folder if building the replacement fails. The extension treats the folder as the source of truth; if its required files are missing or invalid, the branch-selection modal opens automatically. The AI bundle is generated locally. Repository contents are sent to an AI model only when you run an analysis (see below).
 
 Git metadata, including changed paths and commit messages, must be valid UTF-8 for the bundle to be generated; non-UTF-8 patch content is preserved as bytes.
 
-Click **Clear .branchReview** to delete the whole `.branchReview/` folder. A confirmation dialog is shown first.
+Click **Clear .branchReview** to delete the whole `.branchReview/` folder, including saved analysis results. A confirmation dialog is shown first.
+
+## Analysis
+
+The **Analysis** tab sends the changes between the downloaded branches to an AI model chosen through VS Code's language model API (for example, GitHub Copilot). Requires a downloaded review.
+
+1. Choose a **model** and a **profile**: **Java** or **Angular**.
+2. Optionally edit the profile's **guide**, which tells the model what to look for. **Reset to default** restores the built-in guide. Edits are saved for the workspace when you click **Analyze**.
+3. Click **Analyze**. Only changed files matching the profile are sent, as diff patches, in a single request. If the changes are too large for the selected model's input window, the analysis stops before sending and asks you to choose a model with a larger window or narrow the branches. Cancel stops the analysis without saving a report.
+
+Each report is saved to `.branchReview/results/` as a Markdown file (`<id>.md`) with a JSON sidecar (`<id>.json`) holding metadata such as the model, profile, and skipped files. Saved results are listed in the Analysis tab and open in an editor. They survive re-downloading the branches and are removed only by **Clear .branchReview**.
+
+Patches and branch names are untrusted input to the model. The model sees only the diffs, not full files, so it cannot verify context outside the changes. The first use of a model may ask for consent in VS Code.
 
 ## How it works
 
