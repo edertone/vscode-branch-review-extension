@@ -2,4 +2,6 @@ node_modules/
 out/
 *.vsix
 .branchReview/
+.branchReview.stage-*/
+.branchReview.backup-*/
 .DS_Store

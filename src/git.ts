@@ -1,5 +1,5 @@
 import { execFile } from 'child_process';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import * as fs from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
@@ -27,6 +27,19 @@ export interface BranchSnapshot {
   committedAt: string;
   directory: string;
 }
+
+export interface BranchReviewData {
+  valid: true;
+  baseline: { branch: string; commit: string; committedAt: string };
+  target: { branch: string; commit: string; committedAt: string };
+  generatedAt: string;
+  summary: { changedFiles: number; shortStat: string };
+  files: Array<{ status: string; path: string }>;
+}
+
+export type BranchReviewState =
+  | BranchReviewData
+  | { valid: false; reason: string };
 
 interface ChangedFile {
   status: string;
@@ -65,6 +78,87 @@ export function branchReviewRoot(repoRoot: string): string {
   return path.join(repoRoot, BRANCH_REVIEW_DIR);
 }
 
+/** Reads the saved bundle and validates the files the panel relies on. */
+export async function readBranchReview(repoRoot: string): Promise<BranchReviewState> {
+  const root = branchReviewRoot(repoRoot);
+  try {
+    const requireDirectory = async (directory: string) => {
+      if (!(await fs.lstat(directory)).isDirectory()) {
+        throw new Error(`${path.relative(root, directory)} is not a directory.`);
+      }
+    };
+    const requireFile = async (file: string) => {
+      if (!(await fs.lstat(file)).isFile()) {
+        throw new Error(`${path.relative(root, file)} is not a file.`);
+      }
+    };
+    const reviewDir = path.join(root, 'ai-review');
+    await requireDirectory(root);
+    await requireDirectory(path.join(root, 'baseline'));
+    await requireDirectory(path.join(root, 'target'));
+    await requireDirectory(reviewDir);
+    await requireDirectory(path.join(reviewDir, 'files'));
+
+    const manifestPath = path.join(reviewDir, 'manifest.json');
+    const changedFilesPath = path.join(reviewDir, 'changed-files.json');
+    const commitsPath = path.join(reviewDir, 'commits.json');
+    const overviewPath = path.join(reviewDir, 'overview.md');
+    await Promise.all([
+      requireFile(manifestPath),
+      requireFile(changedFilesPath),
+      requireFile(commitsPath),
+      requireFile(overviewPath),
+    ]);
+
+    const manifest: unknown = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+    const changedFilesData: unknown = JSON.parse(await fs.readFile(changedFilesPath, 'utf8'));
+    if (!isRecord(manifest) || manifest.schemaVersion !== 1 ||
+        !isBranchMetadata(manifest.baseline) || !isBranchMetadata(manifest.target) ||
+        typeof manifest.generatedAt !== 'string' || !isRecord(manifest.summary) ||
+        typeof manifest.summary.changedFiles !== 'number' ||
+        typeof manifest.summary.shortStat !== 'string') {
+      throw new Error('manifest.json has an unsupported or invalid format.');
+    }
+    if (!isRecord(changedFilesData) || !Array.isArray(changedFilesData.files) ||
+        changedFilesData.files.some(file =>
+          !isRecord(file) || typeof file.status !== 'string' ||
+          (typeof file.newPath !== 'string' && typeof file.oldPath !== 'string'))) {
+      throw new Error('changed-files.json has an invalid format.');
+    }
+    if (changedFilesData.files.length !== manifest.summary.changedFiles) {
+      throw new Error('The saved changed-file list does not match manifest.json.');
+    }
+
+    return {
+      valid: true,
+      baseline: manifest.baseline,
+      target: manifest.target,
+      generatedAt: manifest.generatedAt,
+      summary: {
+        changedFiles: manifest.summary.changedFiles,
+        shortStat: manifest.summary.shortStat,
+      },
+      files: changedFilesData.files.map(file => ({
+        status: file.status,
+        path: file.newPath ?? file.oldPath,
+      })),
+    };
+  } catch (err) {
+    return { valid: false, reason: (err as Error).message };
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isBranchMetadata(
+  value: unknown,
+): value is { branch: string; commit: string; committedAt: string } {
+  return isRecord(value) && typeof value.branch === 'string' &&
+    typeof value.commit === 'string' && typeof value.committedAt === 'string';
+}
+
 /** Deletes the .branchReview folder. Returns false if it did not exist. */
 export async function clearBranchReview(repoRoot: string): Promise<boolean> {
   const root = branchReviewRoot(repoRoot);
@@ -86,7 +180,8 @@ export async function downloadBranch(
   repoRoot: string,
   branch: string,
   role: BranchRole,
-  log: Logger
+  log: Logger,
+  destinationRoot = branchReviewRoot(repoRoot),
 ): Promise<BranchSnapshot> {
   if (!branch || branch.startsWith('-')) {
     throw new Error(`Invalid branch name: "${branch}"`);
@@ -123,7 +218,7 @@ export async function downloadBranch(
   }
   const committedAt = (await runGit(repoRoot, ['show', '-s', '--format=%cI', commit])).trim();
 
-  const destDir = path.join(branchReviewRoot(repoRoot), role);
+  const destDir = path.join(destinationRoot, role);
   const indexFile = path.join(os.tmpdir(), `branch-review-${process.pid}-${Date.now()}.index`);
   const env = { GIT_INDEX_FILE: indexFile };
 
@@ -148,10 +243,11 @@ export async function generateAiReviewBundle(
   repoRoot: string,
   baseline: BranchSnapshot,
   target: BranchSnapshot,
-  log: Logger
+  log: Logger,
+  destinationRoot = branchReviewRoot(repoRoot),
 ): Promise<string> {
-  const reviewRoot = path.join(branchReviewRoot(repoRoot), 'ai-review');
-  const tempRoot = path.join(branchReviewRoot(repoRoot), `.ai-review-${process.pid}-${Date.now()}`);
+  const reviewRoot = path.join(destinationRoot, 'ai-review');
+  const tempRoot = path.join(destinationRoot, `.ai-review-${process.pid}-${Date.now()}`);
   const backupRoot = `${reviewRoot}.previous-${process.pid}-${Date.now()}`;
   const baseCommit = baseline.commit;
   const targetCommit = target.commit;
@@ -287,6 +383,54 @@ export async function generateAiReviewBundle(
     return reviewRoot;
   } finally {
     await fs.rm(tempRoot, { recursive: true, force: true });
+  }
+}
+
+/** Builds a complete review in a sibling directory, then replaces .branchReview. */
+export async function rebuildBranchReview(
+  repoRoot: string,
+  baselineBranch: string,
+  targetBranch: string,
+  log: Logger,
+): Promise<BranchReviewData> {
+  const finalRoot = branchReviewRoot(repoRoot);
+  const stagingRoot = await fs.mkdtemp(path.join(repoRoot, `${BRANCH_REVIEW_DIR}.stage-`));
+  const backupRoot = path.join(repoRoot, `${BRANCH_REVIEW_DIR}.backup-${randomUUID()}`);
+  let movedPrevious = false;
+
+  try {
+    const baseline = await downloadBranch(repoRoot, baselineBranch, 'baseline', log, stagingRoot);
+    const target = await downloadBranch(repoRoot, targetBranch, 'target', log, stagingRoot);
+    await generateAiReviewBundle(repoRoot, baseline, target, log, stagingRoot);
+
+    try {
+      await fs.rename(finalRoot, backupRoot);
+      movedPrevious = true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw err;
+      }
+    }
+    try {
+      await fs.rename(stagingRoot, finalRoot);
+    } catch (err) {
+      if (movedPrevious) {
+        await fs.rename(backupRoot, finalRoot);
+        movedPrevious = false;
+      }
+      throw err;
+    }
+    if (movedPrevious) {
+      await fs.rm(backupRoot, { recursive: true, force: true });
+    }
+
+    const review = await readBranchReview(repoRoot);
+    if (!review.valid) {
+      throw new Error(`The rebuilt .branchReview folder is invalid: ${review.reason}`);
+    }
+    return review;
+  } finally {
+    await fs.rm(stagingRoot, { recursive: true, force: true });
   }
 }
 

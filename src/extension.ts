@@ -1,11 +1,12 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import {
+  BRANCH_REVIEW_DIR,
   clearBranchReview,
-  downloadBranch,
-  generateAiReviewBundle,
   getCurrentBranchName,
   listBranches,
+  readBranchReview,
+  rebuildBranchReview,
 } from "./git";
 
 const DEFAULT_BASELINE_BRANCH = "develop";
@@ -107,10 +108,50 @@ async function openPanel(context: vscode.ExtensionContext): Promise<void> {
   let pendingRepo: GitRepository | undefined;
   let ready = false;
   let disposed = false;
+  let folderWatcher: vscode.FileSystemWatcher | undefined;
+  let folderChangeTimer: ReturnType<typeof setTimeout> | undefined;
+  let refreshFolderAfterAction = false;
+
+  const syncReviewState = () => {
+    if (busy) {
+      refreshFolderAfterAction = true;
+      return;
+    }
+    const selectedRepo = currentRepo;
+    const selectedRevision = revision;
+    void readBranchReview(selectedRepo.rootUri.fsPath).then((review) => {
+      if (!disposed && selectedRevision === revision) {
+        void currentPanel.webview.postMessage({ type: "reviewState", review });
+      }
+    }, (err: Error) => {
+      output?.appendLine(`Error reading .branchReview: ${err.message}`);
+      vscode.window.showErrorMessage(`Branch Review: unable to read .branchReview: ${err.message}`);
+    });
+  };
+  const watchRepository = (selectedRepo: GitRepository) => {
+    folderWatcher?.dispose();
+    folderWatcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(
+        selectedRepo.rootUri,
+        `${BRANCH_REVIEW_DIR}/**`,
+      ),
+    );
+    const onFolderChange = () => {
+      if (folderChangeTimer) clearTimeout(folderChangeTimer);
+      folderChangeTimer = setTimeout(() => {
+        folderChangeTimer = undefined;
+        syncReviewState();
+      }, 100);
+    };
+    folderWatcher.onDidCreate(onFolderChange);
+    folderWatcher.onDidChange(onFolderChange);
+    folderWatcher.onDidDelete(onFolderChange);
+  };
 
   const loadRepository = () => {
     const selectedRepo = currentRepo;
     const selectedRevision = ++revision;
+    watchRepository(selectedRepo);
     void currentPanel.webview.postMessage({
       type: "project",
       name: path.basename(selectedRepo.rootUri.fsPath),
@@ -142,6 +183,8 @@ async function openPanel(context: vscode.ExtensionContext): Promise<void> {
   });
   currentPanel.onDidDispose(() => {
     disposed = true;
+    folderWatcher?.dispose();
+    if (folderChangeTimer) clearTimeout(folderChangeTimer);
     editorListener.dispose();
     if (panel === currentPanel) panel = undefined;
   }, null, context.subscriptions);
@@ -165,6 +208,9 @@ async function openPanel(context: vscode.ExtensionContext): Promise<void> {
             const selectedRepo = pendingRepo;
             pendingRepo = undefined;
             selectRepository(selectedRepo);
+          } else if (refreshFolderAfterAction) {
+            refreshFolderAfterAction = false;
+            syncReviewState();
           }
         });
       }
@@ -184,7 +230,10 @@ async function initializePanel(
     const repoRoot = repo.rootUri.fsPath;
     const currentBranch =
       (await getCurrentBranchName(repoRoot)) ?? repo.state.HEAD?.name ?? "";
-    const { branches, warnings } = await listBranches(repoRoot);
+    const [{ branches, warnings }, review] = await Promise.all([
+      listBranches(repoRoot),
+      readBranchReview(repoRoot),
+    ]);
     if (!isCurrent()) return;
     for (const warning of warnings) {
       output?.appendLine(`Warning: ${warning}`);
@@ -196,12 +245,14 @@ async function initializePanel(
       branches,
       warnings,
       repoRoot,
+      review,
     });
   } catch (err) {
     if (!isCurrent()) return;
     const text = `Unable to list repository branches: ${(err as Error).message}`;
     output?.appendLine(`Error: ${text}`);
-    webview.postMessage({ type: "initError", text });
+    const review = await readBranchReview(repo.rootUri.fsPath);
+    webview.postMessage({ type: "initError", text, review });
   }
 }
 
@@ -240,6 +291,8 @@ async function handleClear(webview: vscode.Webview, repoRoot: string): Promise<v
       : "Nothing to delete: .branchReview does not exist.";
     output?.appendLine(text);
     webview.postMessage({ type: "done", text });
+    const review = await readBranchReview(repoRoot);
+    webview.postMessage({ type: "reviewState", review });
   } catch (err) {
     const text = (err as Error).message;
     output?.appendLine(`Error: ${text}`);
@@ -282,22 +335,11 @@ async function handleDownload(
   webview.postMessage({ type: "busy", busy: true });
   try {
     log(`Downloading baseline "${branches[0]}"`);
-    const baseline = await downloadBranch(
-      repoRoot,
-      branches[0],
-      "baseline",
-      log,
-    );
-    log(`Downloading target "${branches[1]}"`);
-    const target = await downloadBranch(repoRoot, branches[1], "target", log);
-    const reviewDir = await generateAiReviewBundle(
-      repoRoot,
-      baseline,
-      target,
-      log,
-    );
-    const summary = `Downloaded baseline "${baseline.branch}" and target "${target.branch}"; AI review data generated in ${reviewDir}`;
+    log(`Downloading baseline "${branches[0]}"`);
+    const review = await rebuildBranchReview(repoRoot, branches[0], branches[1], log);
+    const summary = `Downloaded baseline "${review.baseline.branch}" and target "${review.target.branch}" to ${path.join(repoRoot, BRANCH_REVIEW_DIR)}`;
     output?.appendLine(summary);
+    webview.postMessage({ type: "reviewState", review });
     webview.postMessage({ type: "done", text: summary });
     vscode.window.showInformationMessage(`Branch Review: ${summary}`);
   } catch (err) {
@@ -319,8 +361,9 @@ function getHtml(webview: vscode.Webview): string {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Branch Review</title>
   <style>
-    body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 16px; max-width: 520px; }
+    body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 16px; }
     h2 { font-weight: 600; margin-top: 0; }
+    h3 { margin: 0 0 8px; }
     label { display: block; margin-top: 12px; margin-bottom: 4px; }
     input, select {
       box-sizing: border-box; width: 100%; padding: 6px 8px;
@@ -333,39 +376,64 @@ function getHtml(webview: vscode.Webview): string {
     .branch-row input { flex: 1; min-width: 0; }
     .branch-row select { flex: 0 0 42%; min-width: 0; margin-top: 0; }
     button {
-      margin-top: 18px; padding: 6px 14px; cursor: pointer;
+      margin-top: 12px; padding: 6px 14px; cursor: pointer;
       background: var(--vscode-button-background); color: var(--vscode-button-foreground);
       border: none;
     }
     button:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
     button:disabled { opacity: 0.6; cursor: default; }
-    #clear, #refresh { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); margin-left: 8px; }
-    #clear:hover:not(:disabled), #refresh:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); }
+    .secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); margin-left: 8px; }
+    .secondary:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); }
     #project { overflow-wrap: anywhere; }
+    #savedReview { margin-top: 20px; max-width: 760px; }
+    #reviewDetails { white-space: pre-wrap; }
+    #changedFiles { max-height: 45vh; overflow: auto; padding-left: 20px; overflow-wrap: anywhere; }
     #status { margin-top: 16px; white-space: pre-wrap; font-size: 12px; }
     .error { color: var(--vscode-errorForeground); }
     .muted { color: var(--vscode-descriptionForeground); }
+    .modal { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 20px; background: var(--vscode-editor-background); }
+    .modal[hidden], [hidden] { display: none !important; }
+    .modal-content { width: min(520px, 100%); max-height: 90vh; overflow: auto; padding: 20px; background: var(--vscode-sideBar-background, var(--vscode-editor-background)); border: 1px solid var(--vscode-panel-border); box-shadow: 0 8px 32px #0006; }
+    .modal-actions { display: flex; flex-wrap: wrap; align-items: center; }
   </style>
 </head>
 <body>
   <h2>Branch Review</h2>
   <div id="project" class="muted">Loading project...</div>
-  <form id="form">
-    <label for="baseline">Baseline branch (old code)</label>
-    <div class="branch-row">
-      <input id="baseline" autocomplete="off" placeholder="Type or select a branch">
-      <select id="baselineBranches" aria-label="Select baseline branch" disabled></select>
-    </div>
-    <label for="target">Target branch (new code changes)</label>
-    <div class="branch-row">
-      <input id="target" autocomplete="off" placeholder="Type or select a branch">
-      <select id="targetBranches" aria-label="Select target branch" disabled></select>
-    </div>
-    <button id="refresh" type="button" disabled>Refresh branches</button>
-    <button id="download" type="submit" disabled>Download</button>
-    <button id="clear" type="button">Clear .branchReview</button>
-  </form>
+  <section id="savedReview" hidden>
+    <h3>Downloaded review data</h3>
+    <div id="reviewDetails"></div>
+    <ul id="changedFiles"></ul>
+  </section>
+  <div id="noReview" class="muted">Checking .branchReview...</div>
+  <button id="chooseBranches" type="button" disabled>Choose branches / Download</button>
+  <button id="clear" class="secondary" type="button" disabled>Clear .branchReview</button>
   <div id="status" class="muted">Loading branches...</div>
+
+  <div id="selectionModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle" hidden>
+    <div class="modal-content">
+      <h3 id="modalTitle">Choose branches</h3>
+      <p id="modalHelp" class="muted">Select or type the branches to compare. Download rebuilds the entire .branchReview folder.</p>
+      <form id="form">
+        <label for="baseline">Baseline branch (old code)</label>
+        <div class="branch-row">
+          <input id="baseline" autocomplete="off" placeholder="Type or select a branch">
+          <select id="baselineBranches" aria-label="Select baseline branch" disabled></select>
+        </div>
+        <label for="target">Target branch (new code changes)</label>
+        <div class="branch-row">
+          <input id="target" autocomplete="off" placeholder="Type or select a branch">
+          <select id="targetBranches" aria-label="Select target branch" disabled></select>
+        </div>
+        <div class="modal-actions">
+          <button id="refresh" class="secondary" type="button" disabled>Refresh branches</button>
+          <button id="download" type="submit" disabled>Download</button>
+          <button id="cancel" class="secondary" type="button" hidden>Cancel</button>
+        </div>
+      </form>
+      <div id="modalStatus" class="muted" aria-live="polite"></div>
+    </div>
+  </div>
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
@@ -374,15 +442,67 @@ function getHtml(webview: vscode.Webview): string {
     const button = document.getElementById('download');
     const clearButton = document.getElementById('clear');
     const refreshButton = document.getElementById('refresh');
+    const chooseButton = document.getElementById('chooseBranches');
+    const cancelButton = document.getElementById('cancel');
     const project = document.getElementById('project');
+    const savedReview = document.getElementById('savedReview');
+    const reviewDetails = document.getElementById('reviewDetails');
+    const changedFiles = document.getElementById('changedFiles');
+    const noReview = document.getElementById('noReview');
+    const selectionModal = document.getElementById('selectionModal');
     const baselineBranches = document.getElementById('baselineBranches');
     const targetBranches = document.getElementById('targetBranches');
     const status = document.getElementById('status');
+    const modalStatus = document.getElementById('modalStatus');
     let isBusy = false;
     let isLoading = true;
     let isRefreshing = false;
     let baselineEdited = false;
     let targetEdited = false;
+    let hasValidReview = false;
+
+    function setStatus(text, isError) {
+      status.className = isError ? 'error' : 'muted';
+      status.textContent = text;
+      modalStatus.className = isError ? 'error' : 'muted';
+      modalStatus.textContent = text;
+    }
+
+    function showPicker(required) {
+      selectionModal.hidden = false;
+      cancelButton.hidden = required;
+      if (required) {
+        baseline.focus();
+      }
+    }
+
+    function renderReview(review) {
+      hasValidReview = review && review.valid === true;
+      if (!hasValidReview) {
+        savedReview.hidden = true;
+        noReview.hidden = false;
+        noReview.textContent = review && review.reason
+          ? 'No valid downloaded review: ' + review.reason
+          : 'No valid downloaded review. Choose branches to create one.';
+        showPicker(true);
+        return;
+      }
+      savedReview.hidden = false;
+      noReview.hidden = true;
+      reviewDetails.textContent =
+        'Baseline: ' + review.baseline.branch + ' (' + review.baseline.commit.slice(0, 8) + ')\\n' +
+        'Target: ' + review.target.branch + ' (' + review.target.commit.slice(0, 8) + ')\\n' +
+        'Generated: ' + review.generatedAt + '\\n' +
+        'Changed files: ' + review.summary.changedFiles +
+        (review.summary.shortStat ? ' — ' + review.summary.shortStat : '');
+      changedFiles.replaceChildren();
+      for (const file of review.files) {
+        const item = document.createElement('li');
+        item.textContent = file.status + '  ' + file.path;
+        changedFiles.appendChild(item);
+      }
+      selectionModal.hidden = true;
+    }
 
     function updateDownloadState() {
       const base = baseline.value.trim();
@@ -390,8 +510,11 @@ function getHtml(webview: vscode.Webview): string {
       button.disabled = isBusy || isLoading || isRefreshing || !base || !head || base === head;
       refreshButton.disabled = isBusy || isLoading || isRefreshing;
       clearButton.disabled = isBusy || isLoading || isRefreshing;
+      chooseButton.disabled = isBusy || isLoading || isRefreshing;
       baselineBranches.disabled = isBusy || isLoading || isRefreshing;
       targetBranches.disabled = isBusy || isLoading || isRefreshing;
+      baseline.disabled = isBusy || isLoading || isRefreshing;
+      target.disabled = isBusy || isLoading || isRefreshing;
     }
 
     function populateBranches(branches) {
@@ -442,6 +565,16 @@ function getHtml(webview: vscode.Webview): string {
       vscode.postMessage({ type: 'clear' });
     });
 
+    chooseButton.addEventListener('click', () => {
+      showPicker(false);
+    });
+
+    cancelButton.addEventListener('click', () => {
+      if (hasValidReview && !isBusy) {
+        selectionModal.hidden = true;
+      }
+    });
+
     refreshButton.addEventListener('click', () => {
       vscode.postMessage({ type: 'refresh' });
     });
@@ -458,8 +591,7 @@ function getHtml(webview: vscode.Webview): string {
           targetEdited = false;
           populateBranches([]);
           isLoading = true;
-          status.className = 'muted';
-          status.textContent = 'Loading branches...';
+          setStatus('Loading branches...', false);
           updateDownloadState();
           break;
         case 'init':
@@ -475,50 +607,49 @@ function getHtml(webview: vscode.Webview): string {
           if (!baselineEdited) baseline.value = baselineDefault;
           if (!targetEdited) target.value = targetDefault;
           isLoading = false;
-          status.className = message.warnings.length ? 'error' : 'muted';
-          status.textContent = message.warnings.join('\\n') ||
-            (branches.length ? '' : 'No branches found. You can type branch names.');
+          renderReview(message.review);
+          setStatus(message.warnings.join('\\n') ||
+            (branches.length ? '' : 'No branches found. You can type branch names.'),
+            message.warnings.length > 0);
           updateDownloadState();
           break;
         case 'refreshing':
           isRefreshing = message.refreshing;
           refreshButton.textContent = isRefreshing ? 'Refreshing...' : 'Refresh branches';
           if (isRefreshing) {
-            status.className = 'muted';
-            status.textContent = 'Refreshing branches...';
+            setStatus('Refreshing branches...', false);
           }
           updateDownloadState();
           break;
         case 'refreshed':
           populateBranches(message.branches);
-          status.className = message.warnings.length ? 'error' : 'muted';
-          status.textContent = message.warnings.join('\\n') ||
-            (message.branches.length ? 'Branches refreshed.' : 'No branches found. You can type branch names.');
+          setStatus(message.warnings.join('\\n') ||
+            (message.branches.length ? 'Branches refreshed.' : 'No branches found. You can type branch names.'),
+            message.warnings.length > 0);
           updateDownloadState();
           break;
         case 'busy':
           isBusy = message.busy;
-          baseline.disabled = isBusy;
-          target.disabled = isBusy;
           updateDownloadState();
           button.textContent = message.busy ? 'Downloading...' : 'Download';
           break;
         case 'progress':
-          status.className = 'muted';
-          status.textContent = message.text;
+          setStatus(message.text, false);
           break;
         case 'done':
-          status.className = 'muted';
-          status.textContent = message.text;
+          setStatus(message.text, false);
           break;
         case 'error':
-          status.className = 'error';
-          status.textContent = message.text;
+          setStatus(message.text, true);
           break;
         case 'initError':
           isLoading = false;
-          status.className = 'error';
-          status.textContent = message.text;
+          renderReview(message.review);
+          setStatus(message.text, true);
+          updateDownloadState();
+          break;
+        case 'reviewState':
+          renderReview(message.review);
           updateDownloadState();
           break;
       }

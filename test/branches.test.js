@@ -6,7 +6,13 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 const Module = require('node:module');
-const { listBranches, downloadBranch } = require('../out/git');
+const {
+  branchReviewRoot,
+  listBranches,
+  downloadBranch,
+  readBranchReview,
+  rebuildBranchReview
+} = require('../out/git');
 
 function git(cwd, ...args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -76,21 +82,64 @@ test('suggests local branches without a remote', async t => {
   assert.equal(await fs.readFile(path.join(snapshot.directory, 'file.txt'), 'utf8'), 'main\n');
 });
 
+test('rebuilds the whole review folder and detects invalid saved data', async t => {
+  const { repo } = await fixture(t);
+  const root = branchReviewRoot(repo);
+  assert.equal((await readBranchReview(repo)).valid, false);
+
+  const first = await rebuildBranchReview(repo, 'main', 'origin/feature/not-fetched', () => {});
+  assert.equal(first.valid, true);
+  assert.equal(first.baseline.branch, 'main');
+  assert.equal(first.target.branch, 'origin/feature/not-fetched');
+  assert.ok(first.files.some(file => file.path === 'file.txt'));
+
+  await fs.writeFile(path.join(root, 'stale.txt'), 'remove on rebuild');
+  const second = await rebuildBranchReview(repo, 'main', 'origin/develop', () => {});
+  assert.equal(second.valid, true);
+  await assert.rejects(fs.stat(path.join(root, 'stale.txt')), { code: 'ENOENT' });
+  await assert.rejects(
+    rebuildBranchReview(repo, 'missing-branch', 'develop', () => {}),
+    /Branch "missing-branch" was not found/,
+  );
+  const preserved = await readBranchReview(repo);
+  assert.equal(preserved.valid, true);
+  assert.equal(preserved.target.branch, 'origin/develop');
+  assert.deepEqual(
+    (await fs.readdir(repo)).filter(name => name.startsWith('.branchReview.')),
+    [],
+  );
+
+  await fs.writeFile(path.join(root, 'ai-review', 'manifest.json'), '{invalid');
+  const invalid = await readBranchReview(repo);
+  assert.equal(invalid.valid, false);
+  assert.match(invalid.reason, /JSON|position|property/i);
+});
+
 test('webview initializes, shares branch suggestions, and accepts typed names', async t => {
   const { repo, seed } = await fixture(t);
   const elements = new Map();
   function element(id) {
     return {
-      id, value: '', disabled: false, textContent: '', className: '', children: [],
+      id, value: '', disabled: false, hidden: false, textContent: '', className: '', children: [],
       listeners: {},
       addEventListener(type, callback) { this.listeners[type] = callback; },
       replaceChildren() { this.children = []; },
-      appendChild(child) { this.children.push(child); }
+      appendChild(child) { this.children.push(child); },
+      focus() {}
     };
   }
-  for (const id of ['baseline', 'target', 'baselineBranches', 'targetBranches', 'download', 'clear', 'refresh', 'project', 'status', 'form']) {
+  for (const id of [
+    'baseline', 'target', 'baselineBranches', 'targetBranches', 'download',
+    'clear', 'refresh', 'chooseBranches', 'cancel', 'project', 'status',
+    'modalStatus', 'savedReview', 'reviewDetails', 'changedFiles', 'noReview',
+    'selectionModal', 'form'
+  ]) {
     elements.set(id, element(id));
   }
+  elements.get('selectionModal').hidden = true;
+  elements.get('savedReview').hidden = true;
+  elements.get('noReview').hidden = false;
+  elements.get('cancel').hidden = true;
   const outbound = [];
   let hostListener;
   let webviewListener;
@@ -111,6 +160,13 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
     }
   };
   const panel = { webview, onDidDispose() {}, reveal() {}, dispose() {} };
+  const watcherEvents = {};
+  const watcher = {
+    onDidCreate(callback) { watcherEvents.create = callback; },
+    onDidChange(callback) { watcherEvents.change = callback; },
+    onDidDelete(callback) { watcherEvents.delete = callback; },
+    dispose() {}
+  };
   let command;
   const vscode = {
     extensions: { getExtension: () => ({ isActive: true, exports: { getAPI: () => ({
@@ -123,6 +179,10 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
       createOutputChannel: () => ({ appendLine() {}, dispose() {} }),
       createWebviewPanel: () => panel,
       onDidChangeActiveTextEditor(callback) { editorListener = callback; return { dispose() {} }; }
+    },
+    workspace: { createFileSystemWatcher: () => watcher },
+    RelativePattern: class {
+      constructor(base, pattern) { this.base = base; this.pattern = pattern; }
     },
     commands: { registerCommand(name, callback) { command = callback; return { dispose() {} }; } },
     ViewColumn: { Active: 1 }
@@ -158,6 +218,20 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
   assert.equal(message.type, 'init');
   assert.equal(elements.get('project').textContent, 'Project: repo');
   assert.equal(elements.get('project').title, repo);
+  assert.equal(elements.get('selectionModal').hidden, false);
+  assert.equal(elements.get('cancel').hidden, true);
+  const externalSync = new Promise(resolve => { nextMessage = { type: 'reviewState', resolve }; });
+  await rebuildBranchReview(repo, 'main', 'origin/feature/not-fetched', () => {});
+  watcherEvents.change();
+  await externalSync;
+  assert.equal(elements.get('selectionModal').hidden, true);
+  assert.equal(elements.get('savedReview').hidden, false);
+  assert.ok(elements.get('reviewDetails').textContent.includes('origin/feature/not-fetched'));
+  elements.get('chooseBranches').listeners.click();
+  assert.equal(elements.get('selectionModal').hidden, false);
+  assert.equal(elements.get('cancel').hidden, false);
+  elements.get('cancel').listeners.click();
+  assert.equal(elements.get('selectionModal').hidden, true);
   for (const id of ['baselineBranches', 'targetBranches']) {
     assert.ok(elements.get(id).children.some(option => option.value === 'upstream/develop'));
     assert.ok(elements.get(id).children.some(option => option.value === 'main'));

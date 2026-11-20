@@ -8,3 +8,5 @@ tsconfig.json
 **/*.vsix
 .DS_Store
 .branchReview/**
+.branchReview.stage-*/**
+.branchReview.backup-*/**
