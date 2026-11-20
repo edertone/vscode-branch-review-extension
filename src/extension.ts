@@ -450,6 +450,7 @@ function getHtml(webview: vscode.Webview): string {
     const changedFiles = document.getElementById('changedFiles');
     const noReview = document.getElementById('noReview');
     const selectionModal = document.getElementById('selectionModal');
+    const modalTitle = document.getElementById('modalTitle');
     const baselineBranches = document.getElementById('baselineBranches');
     const targetBranches = document.getElementById('targetBranches');
     const status = document.getElementById('status');
@@ -585,6 +586,7 @@ function getHtml(webview: vscode.Webview): string {
         case 'project':
           project.textContent = 'Project: ' + message.name;
           project.title = message.repoRoot;
+          modalTitle.textContent = 'Choose branches — ' + message.name;
           baseline.value = '';
           target.value = '';
           baselineEdited = false;

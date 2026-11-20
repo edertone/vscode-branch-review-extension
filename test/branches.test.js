@@ -131,7 +131,7 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
   for (const id of [
     'baseline', 'target', 'baselineBranches', 'targetBranches', 'download',
     'clear', 'refresh', 'chooseBranches', 'cancel', 'project', 'status',
-    'modalStatus', 'savedReview', 'reviewDetails', 'changedFiles', 'noReview',
+    'modalStatus', 'modalTitle', 'savedReview', 'reviewDetails', 'changedFiles', 'noReview',
     'selectionModal', 'form'
   ]) {
     elements.set(id, element(id));
@@ -218,6 +218,7 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
   assert.equal(message.type, 'init');
   assert.equal(elements.get('project').textContent, 'Project: repo');
   assert.equal(elements.get('project').title, repo);
+  assert.equal(elements.get('modalTitle').textContent, 'Choose branches — repo');
   assert.equal(elements.get('selectionModal').hidden, false);
   assert.equal(elements.get('cancel').hidden, true);
   const externalSync = new Promise(resolve => { nextMessage = { type: 'reviewState', resolve }; });
@@ -302,6 +303,7 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
   await switched;
   assert.equal(elements.get('project').textContent, 'Project: seed');
   assert.equal(elements.get('project').title, seed);
+  assert.equal(elements.get('modalTitle').textContent, 'Choose branches — seed');
   assert.equal(elements.get('target').value, 'origin/feature/not-fetched');
   assert.notEqual(elements.get('baseline').value, 'custom/base');
 });
