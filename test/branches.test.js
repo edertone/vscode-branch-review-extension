@@ -155,6 +155,10 @@ test('uses cached or local commits only after confirmation for each failed fetch
   assert.equal(review.baseline.commit, prompts[0].commit);
   assert.equal(review.target.commit, prompts[1].commit);
   assert.match(prompts[0].reason, /Cannot fetch branch "local-only"/);
+  const manifest = JSON.parse(await fs.readFile(path.join(branchReviewRoot(repo), 'ai-review', 'manifest.json'), 'utf8'));
+  assert.equal(manifest.baseline.source.type, 'local-fallback');
+  assert.equal(manifest.baseline.source.ref, prompts[0].ref);
+  assert.match(manifest.baseline.source.reason, /Cannot fetch/);
 
   git(repo, 'update-ref', '-d', 'refs/remotes/origin/local-only');
   const local = [];
@@ -173,6 +177,72 @@ test('uses cached or local commits only after confirmation for each failed fetch
     /No locally available commit can be used/,
   );
   assert.equal(called, false);
+});
+
+test('review bundle describes literal paths, binary and submodule changes, truncation, and divergent history', async t => {
+  const { repo, seed } = await fixture(t);
+  git(seed, 'checkout', 'main');
+  await fs.writeFile(path.join(seed, 'baseline-only.txt'), 'baseline\n');
+  git(seed, 'add', '.');
+  git(seed, 'commit', '-m', 'baseline only');
+  git(seed, 'checkout', 'feature/not-fetched');
+  const specialPath = ':(glob)*';
+  await fs.writeFile(path.join(seed, specialPath), 'special\n');
+  await fs.writeFile(path.join(seed, 'other.txt'), 'other\n');
+  await fs.unlink(path.join(seed, 'file.txt'));
+  await fs.symlink('other.txt', path.join(seed, 'file.txt'));
+  await fs.writeFile(path.join(seed, 'image.bin'), Buffer.from([0, 1, 2, 3]));
+  await fs.writeFile(path.join(seed, 'legacy.txt'), Buffer.from([0xff, 0x0a]));
+  await fs.writeFile(path.join(seed, 'large.txt'), 'long line for truncation\n'.repeat(15000));
+  git(seed, 'add', '--all');
+  git(seed, 'update-index', '--add', '--cacheinfo', `160000,${git(seed, 'rev-parse', 'main')},module`);
+  git(seed, '-c', 'user.name=Test', 'commit', '-m', 'target\x1echanges', '--date=2020-01-01T00:00:00Z');
+  const targetCommit = git(seed, 'rev-parse', 'HEAD');
+  const commitTime = git(seed, 'show', '-s', '--format=%cI', targetCommit);
+  git(seed, 'push', 'origin', 'main', 'feature/not-fetched');
+
+  git(repo, 'config', 'diff.ignoreSubmodules', 'all');
+  await rebuildBranchReview(repo, 'main', 'feature/not-fetched', () => {});
+  const review = path.join(branchReviewRoot(repo), 'ai-review');
+  const manifest = JSON.parse(await fs.readFile(path.join(review, 'manifest.json'), 'utf8'));
+  const { files } = JSON.parse(await fs.readFile(path.join(review, 'changed-files.json'), 'utf8'));
+  const { commits } = JSON.parse(await fs.readFile(path.join(review, 'commits.json'), 'utf8'));
+  const special = files.find(file => file.newPath === specialPath);
+  const patch = await fs.readFile(path.join(review, special.diffFile), 'utf8');
+  assert.match(patch, /\+special/);
+  assert.doesNotMatch(patch, /\+other/);
+  const binary = files.find(file => file.newPath === 'image.bin');
+  assert.equal(binary.binary, true);
+  assert.equal(binary.additions, null);
+  assert.match(await fs.readFile(path.join(review, binary.diffFile), 'utf8'), /Binary files/);
+  const legacy = files.find(file => file.newPath === 'legacy.txt');
+  assert.ok((await fs.readFile(path.join(review, legacy.diffFile))).includes(Buffer.from([0x2b, 0xff, 0x0a])));
+  const submodule = files.find(file => file.newPath === 'module');
+  assert.equal(submodule.newMode, '160000');
+  assert.equal(submodule.newObject, git(seed, 'rev-parse', 'main'));
+  const symlink = files.find(file => file.newPath === 'file.txt');
+  assert.equal(symlink.status, 'T');
+  assert.equal(symlink.newMode, '120000');
+  const large = files.find(file => file.newPath === 'large.txt');
+  assert.equal(large.diffTruncated, true);
+  assert.ok((await fs.stat(path.join(review, large.diffFile))).size <= manifest.limits.maxFileDiffBytes);
+  assert.equal(manifest.summary.diffTruncated, true);
+  assert.deepEqual(manifest.history, { baselineOnlyCommits: 1, targetOnlyCommits: 2, shallow: false });
+  assert.equal(commits.find(commit => commit.commit === targetCommit).committedAt, commitTime);
+  assert.equal(commits.find(commit => commit.commit === targetCommit).subject, 'target\x1echanges');
+  assert.equal(manifest.target.source.type, 'remote');
+});
+
+test('marks shallow history as potentially incomplete', async t => {
+  const { root } = await fixture(t);
+  const repo = path.join(root, 'shallow');
+  git(root, 'clone', '--depth=1', '--branch', 'main', `file://${path.join(root, 'remote.git')}`, repo);
+  await rebuildBranchReview(repo, 'main', 'feature/not-fetched', () => {});
+  const review = path.join(branchReviewRoot(repo), 'ai-review');
+  const manifest = JSON.parse(await fs.readFile(path.join(review, 'manifest.json'), 'utf8'));
+  const overview = await fs.readFile(path.join(review, 'overview.md'), 'utf8');
+  assert.equal(manifest.history.shallow, true);
+  assert.match(overview, /history is shallow/);
 });
 
 test('cancelled fallback preserves the previous review', async t => {

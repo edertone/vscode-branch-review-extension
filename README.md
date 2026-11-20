@@ -25,14 +25,16 @@ The selected branches are written to role-based folders, regardless of their bra
 
 `ai-review/` contains:
 
-- `manifest.json`: exact branch names, commit IDs, commit times, generation details, and size limits.
+- `manifest.json`: exact branch names, commit IDs, commit times, fetch/fallback provenance, history divergence, shallow-history flag, generation details, and size limits.
 - `overview.md`: comparison direction and review guidance.
-- `changed-files.json`: changed paths and links to per-file diffs.
-- `files/`: unified diffs with 40 lines of context.
+- `changed-files.json`: complete changed-path inventory, Git modes and object IDs, text line counts, binary flags, and links to per-file diffs.
+- `files/`: unified diffs with 40 lines of context; binary payloads are not included.
 - `commits.json`: commits reachable from target but not baseline.
 - `context/`: selected small project README and manifest files from target.
 
-The comparison is a direct tree diff from baseline to target; it does not infer age from branch names or commit dates and is not a merge-base comparison. Large diffs and commit lists are capped, with truncation recorded in the bundle. Each download builds the complete review in a staging folder and replaces `.branchReview/` only after all branch snapshots and review data have been generated. This removes stale files and preserves the previous valid folder if building the replacement fails. The extension treats the folder as the source of truth; if its required files are missing or invalid, the branch-selection modal opens automatically. The AI bundle is generated locally; the extension does not send repository contents to an AI service.
+The comparison is a direct tree diff from baseline to target; it does not infer age from branch names or commit dates and is not a merge-base comparison. Renames are represented as deletions and additions. The commit list contains only target-only history; shallow clones can make history counts and the list incomplete. Large diffs and commit lists are capped, with truncation recorded in the bundle; use the snapshots or recorded Git objects to investigate omitted content. Snapshots do not contain submodule contents, symlinks may point outside the snapshots, and Git LFS, checkout filters, or platform checkout behavior can affect snapshot contents. Uncommitted changes are excluded. Each download builds the complete review in a staging folder and replaces `.branchReview/` only after all branch snapshots and review data have been generated. This removes stale files and preserves the previous valid folder if building the replacement fails. The extension treats the folder as the source of truth; if its required files are missing or invalid, the branch-selection modal opens automatically. The AI bundle is generated locally; the extension does not send repository contents to an AI service.
+
+Git metadata, including changed paths and commit messages, must be valid UTF-8 for the bundle to be generated; non-UTF-8 patch content is preserved as bytes.
 
 Click **Clear .branchReview** to delete the whole `.branchReview/` folder. A confirmation dialog is shown first.
 
