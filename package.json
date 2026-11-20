@@ -2,10 +2,11 @@
   "name": "branch-review",
   "displayName": "Branch Review",
   "description": "Download two git branches into .branchReview/ for side-by-side review.",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "publisher": "local-dev",
   "private": true,
   "license": "MIT",
+  "icon": "./assets/icon.png",
   "engines": {
     "vscode": "^1.106.0"
   },
@@ -14,9 +15,6 @@
     "Other"
   ],
   "main": "./out/extension.js",
-  "activationEvents": [
-    "onView:branchReview.view"
-  ],
   "contributes": {
     "commands": [
       {
@@ -30,7 +28,7 @@
         {
           "id": "branchReview",
           "title": "Branch Review",
-          "icon": "$(git-compare)"
+          "icon": "assets/icon.svg"
         }
       ]
     },
@@ -39,6 +37,7 @@
         {
           "id": "branchReview.view",
           "name": "Branch Review",
+          "icon": "assets/icon.svg",
           "type": "webview"
         }
       ]

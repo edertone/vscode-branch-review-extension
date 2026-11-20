@@ -16,7 +16,7 @@ Click **Refresh branches** in the modal to query origin and the other configured
 
 The selected branches are written to role-based folders, regardless of their branch names:
 
-```
+```text
 .branchReview/
   baseline/
   target/
@@ -43,7 +43,7 @@ Click **Clear .branchReview** to delete the whole `.branchReview/` folder. A con
 - Generates `ai-review/` only after both branch trees have been exported successfully.
 - Logs are written to the **Branch Review** output channel.
 
-## Development
+## Development and install
 
 ```bash
 npm run build   # installs dependencies, compiles, and produces branch-review-<version>.vsix
