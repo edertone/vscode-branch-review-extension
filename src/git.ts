@@ -20,6 +20,16 @@ const MAX_TOTAL_CONTEXT_BYTES = 500 * 1024;
 export type Logger = (message: string) => void;
 export type BranchRole = 'baseline' | 'target';
 
+export interface FetchFallback {
+  role: BranchRole;
+  branch: string;
+  ref: string;
+  commit: string;
+  reason: string;
+}
+
+export type ConfirmFetchFallback = (fallback: FetchFallback) => Promise<boolean>;
+
 export interface BranchSnapshot {
   role: BranchRole;
   branch: string;
@@ -172,7 +182,7 @@ export async function clearBranchReview(repoRoot: string): Promise<boolean> {
 }
 
 /**
- * Fetches the branch from origin (when available), then exports its tree into
+ * Fetches the branch from its remote, then exports its tree into
  * .branchReview/<role>. Existing content of that folder is replaced.
  * Uses a temporary index file, so the user's index, HEAD and working tree are not modified.
  */
@@ -182,6 +192,7 @@ export async function downloadBranch(
   role: BranchRole,
   log: Logger,
   destinationRoot = branchReviewRoot(repoRoot),
+  confirmFallback?: ConfirmFetchFallback,
 ): Promise<BranchSnapshot> {
   if (!branch || branch.startsWith('-')) {
     throw new Error(`Invalid branch name: "${branch}"`);
@@ -197,24 +208,42 @@ export async function downloadBranch(
     .find(remote => branch.startsWith(`${remote}/`));
   const remote = selectedRemote ?? REMOTE;
   const remoteBranch = selectedRemote ? branch.slice(selectedRemote.length + 1) : branch;
-  if (remotes.includes(remote)) {
+  let fetchError: string | undefined;
+  if (!remotes.includes(remote)) {
+    fetchError = `Cannot fetch branch "${branch}": remote "${remote}" is not configured.`;
+  } else {
     log(`Fetching ${remote}/${remoteBranch}...`);
     try {
       await runGit(repoRoot, [
         'fetch', '--no-tags', remote, `+refs/heads/${remoteBranch}:refs/remotes/${remote}/${remoteBranch}`
       ]);
     } catch (err) {
-      log(`Fetch failed, using local data if available: ${(err as Error).message}`);
+      fetchError = `Cannot fetch branch "${branch}" from "${remote}": ${(err as Error).message}`;
     }
-  } else {
-    log(`No "${remote}" remote configured; using local data.`);
   }
 
-  const commit =
-    (await resolveCommit(repoRoot, `refs/remotes/${remote}/${remoteBranch}`)) ??
-    (selectedRemote ? undefined : await resolveCommit(repoRoot, `refs/heads/${branch}`));
+  const remoteRef = `refs/remotes/${remote}/${remoteBranch}`;
+  let commit = await resolveCommit(repoRoot, remoteRef);
+  if (fetchError) {
+    log(fetchError);
+    if (!confirmFallback) {
+      throw new Error(fetchError);
+    }
+    let ref = remoteRef;
+    if (!commit && !selectedRemote) {
+      ref = `refs/heads/${branch}`;
+      commit = await resolveCommit(repoRoot, ref);
+    }
+    if (!commit) {
+      throw new Error(`${fetchError}\nNo locally available commit can be used.`);
+    }
+    if (!await confirmFallback({ role, branch, ref, commit, reason: fetchError })) {
+      throw new Error(`Download cancelled: fresh data for branch "${branch}" could not be fetched.`);
+    }
+    log(`Using local ${ref} (${commit.slice(0, 8)}) for ${role}; it may be out of date.`);
+  }
   if (!commit) {
-    throw new Error(`Branch "${branch}" was not found locally or on ${remote}.`);
+    throw new Error(`Cannot resolve fetched branch "${branch}" on "${remote}".`);
   }
   const committedAt = (await runGit(repoRoot, ['show', '-s', '--format=%cI', commit])).trim();
 
@@ -392,6 +421,7 @@ export async function rebuildBranchReview(
   baselineBranch: string,
   targetBranch: string,
   log: Logger,
+  confirmFallback?: ConfirmFetchFallback,
 ): Promise<BranchReviewData> {
   const finalRoot = branchReviewRoot(repoRoot);
   const stagingRoot = await fs.mkdtemp(path.join(repoRoot, `${BRANCH_REVIEW_DIR}.stage-`));
@@ -399,8 +429,8 @@ export async function rebuildBranchReview(
   let movedPrevious = false;
 
   try {
-    const baseline = await downloadBranch(repoRoot, baselineBranch, 'baseline', log, stagingRoot);
-    const target = await downloadBranch(repoRoot, targetBranch, 'target', log, stagingRoot);
+    const baseline = await downloadBranch(repoRoot, baselineBranch, 'baseline', log, stagingRoot, confirmFallback);
+    const target = await downloadBranch(repoRoot, targetBranch, 'target', log, stagingRoot, confirmFallback);
     await generateAiReviewBundle(repoRoot, baseline, target, log, stagingRoot);
 
     try {

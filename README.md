@@ -10,7 +10,7 @@ VS Code extension that downloads a baseline and target Git branch into `.branchR
 
 VS Code 1.106 or later is required. If you have moved the view, VS Code will reopen it in its saved location; use **View: Reset View Locations** to restore its default position.
 
-Use **Browse branches** under either input to see the full list of local branches and branches queried directly from every configured remote, including branches not yet fetched. You can also type a branch name. Remote branches are shown as `remote/branch` (for example, `origin/develop`); a manually entered unqualified name uses `origin` when available. If a remote cannot be queried, a warning is shown and its cached remote-tracking branches are not listed.
+Use **Browse branches** under either input to see the full list of local branches and branches queried directly from every configured remote, including branches not yet fetched. You can also type a branch name. Remote branches are shown as `remote/branch` (for example, `origin/develop`); an unqualified name uses `origin`. If a remote cannot be queried, a warning is shown and its cached remote-tracking branches are not listed.
 
 Click **Refresh branches** in the modal to query origin and the other configured remotes again without changing the selected or typed branch names. The view follows the active editor's Git repository; if no editor belongs to a repository when opened, it uses the first open repository. The displayed project name is the repository's folder name. The extension watches the selected repository's `.branchReview/` folder and updates the view when its contents change.
 
@@ -38,7 +38,7 @@ Click **Clear .branchReview** to delete the whole `.branchReview/` folder. A con
 
 ## How it works
 
-- Fetches each branch from its specified remote, or from `origin` for unqualified names. If fetching fails, a locally known remote-tracking branch is used; for unqualified names, a local branch is also used as a fallback.
+- Fetches each branch from its specified remote, or from `origin` for unqualified names. If a fetch fails or the required remote is not configured, you can cancel or explicitly choose a locally available commit that may be out of date. The cached remote-tracking branch is preferred; for unqualified names, a local branch is used if no cached remote branch exists. If no local commit is available, the download fails. Cancelling or failing preserves the existing review.
 - Exports the committed tree of the branch. Your index, `HEAD`, and working tree are not modified; uncommitted changes are not included.
 - Generates `ai-review/` only after both branch trees have been exported successfully.
 - Logs are written to the **Branch Review** output channel.

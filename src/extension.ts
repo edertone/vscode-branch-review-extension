@@ -446,6 +446,17 @@ async function handleDownload(
       branches[0],
       branches[1],
       log,
+      async ({ role, branch, ref, commit, reason }) => {
+        const choice = await vscode.window.showWarningMessage(
+          `Branch Review: could not fetch ${role} branch "${branch}".`,
+          {
+            modal: true,
+            detail: `${reason}\n\nUse local ${ref} at ${commit}? This data may be out of date.`,
+          },
+          "Use Local Data",
+        );
+        return choice === "Use Local Data";
+      },
     );
     const summary = `Downloaded baseline "${review.baseline.branch}" and target "${review.target.branch}" to ${path.join(repoRoot, BRANCH_REVIEW_DIR)}`;
     output?.appendLine(summary);

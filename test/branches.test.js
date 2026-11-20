@@ -79,8 +79,112 @@ test('suggests local branches without a remote', async t => {
   const result = await listBranches(repo);
   assert.deepEqual(result.warnings, []);
   assert.deepEqual(result.branches, ['main']);
-  const snapshot = await downloadBranch(repo, 'main', 'baseline', () => {});
+  await assert.rejects(
+    downloadBranch(repo, 'main', 'baseline', () => {}),
+    /Cannot fetch branch "main": remote "origin" is not configured/,
+  );
+  const confirmations = [];
+  const snapshot = await downloadBranch(repo, 'main', 'baseline', () => {}, branchReviewRoot(repo), async fallback => {
+    confirmations.push(fallback);
+    return true;
+  });
+  assert.equal(confirmations[0].ref, 'refs/heads/main');
+  assert.match(confirmations[0].reason, /remote "origin" is not configured/);
   assert.equal(await fs.readFile(path.join(snapshot.directory, 'file.txt'), 'utf8'), 'main\n');
+});
+
+test('downloads the latest remote commits for both branches', async t => {
+  const { repo, seed } = await fixture(t);
+  git(seed, 'checkout', 'main');
+  await fs.writeFile(path.join(seed, 'file.txt'), 'updated main\n');
+  git(seed, 'commit', '-am', 'update main');
+  const mainCommit = git(seed, 'rev-parse', 'HEAD');
+  git(seed, 'checkout', 'feature/not-fetched');
+  await fs.writeFile(path.join(seed, 'file.txt'), 'updated feature\n');
+  git(seed, 'commit', '-am', 'update feature');
+  const featureCommit = git(seed, 'rev-parse', 'HEAD');
+  git(seed, 'push', 'origin', 'main', 'feature/not-fetched');
+
+  const review = await rebuildBranchReview(repo, 'main', 'upstream/feature/not-fetched', () => {});
+  assert.equal(review.baseline.commit, mainCommit);
+  assert.equal(review.target.commit, featureCommit);
+  assert.equal(await fs.readFile(path.join(branchReviewRoot(repo), 'baseline', 'file.txt'), 'utf8'), 'updated main\n');
+  assert.equal(await fs.readFile(path.join(branchReviewRoot(repo), 'target', 'file.txt'), 'utf8'), 'updated feature\n');
+});
+
+test('rejects failed fetches even when cached or local branches exist and preserves the review', async t => {
+  const { root, repo, seed } = await fixture(t);
+  const initial = await rebuildBranchReview(repo, 'main', 'origin/develop', () => {});
+  git(repo, 'remote', 'set-url', 'upstream', path.join(root, 'missing.git'));
+  git(repo, 'update-ref', 'refs/remotes/upstream/develop', git(repo, 'rev-parse', 'HEAD'));
+  await assert.rejects(
+    rebuildBranchReview(repo, 'main', 'upstream/develop', () => {}),
+    /Cannot fetch branch "upstream\/develop" from "upstream"/,
+  );
+  assert.deepEqual(await readBranchReview(repo), initial);
+  assert.deepEqual(
+    (await fs.readdir(repo)).filter(name => name.startsWith('.branchReview.')),
+    [],
+  );
+
+  git(seed, 'push', 'origin', '--delete', 'develop');
+  git(repo, 'branch', 'develop');
+  await assert.rejects(
+    downloadBranch(repo, 'develop', 'target', () => {}),
+    /Cannot fetch branch "develop" from "origin"/,
+  );
+  assert.deepEqual(await readBranchReview(repo), initial);
+});
+
+test('uses cached or local commits only after confirmation for each failed fetch', async t => {
+  const { root, repo } = await fixture(t);
+  git(repo, 'branch', 'local-only');
+  git(repo, 'update-ref', 'refs/remotes/origin/local-only', git(repo, 'rev-parse', 'origin/main'));
+  git(repo, 'update-ref', 'refs/remotes/upstream/develop', git(repo, 'rev-parse', 'HEAD'));
+  git(repo, 'remote', 'set-url', 'origin', path.join(root, 'missing-origin.git'));
+  git(repo, 'remote', 'set-url', 'upstream', path.join(root, 'missing-upstream.git'));
+  const prompts = [];
+  const review = await rebuildBranchReview(repo, 'local-only', 'upstream/develop', () => {}, async fallback => {
+    prompts.push(fallback);
+    return true;
+  });
+  assert.deepEqual(prompts.map(({ role, ref }) => ({ role, ref })), [
+    { role: 'baseline', ref: 'refs/remotes/origin/local-only' },
+    { role: 'target', ref: 'refs/remotes/upstream/develop' },
+  ]);
+  assert.equal(review.baseline.commit, prompts[0].commit);
+  assert.equal(review.target.commit, prompts[1].commit);
+  assert.match(prompts[0].reason, /Cannot fetch branch "local-only"/);
+
+  git(repo, 'update-ref', '-d', 'refs/remotes/origin/local-only');
+  const local = [];
+  await rebuildBranchReview(repo, 'local-only', 'upstream/develop', () => {}, async fallback => {
+    local.push(fallback);
+    return true;
+  });
+  assert.equal(local[0].ref, 'refs/heads/local-only');
+
+  let called = false;
+  await assert.rejects(
+    rebuildBranchReview(repo, 'missing-branch', 'upstream/develop', () => {}, async () => {
+      called = true;
+      return true;
+    }),
+    /No locally available commit can be used/,
+  );
+  assert.equal(called, false);
+});
+
+test('cancelled fallback preserves the previous review', async t => {
+  const { root, repo } = await fixture(t);
+  const initial = await rebuildBranchReview(repo, 'main', 'origin/develop', () => {});
+  git(repo, 'remote', 'set-url', 'upstream', path.join(root, 'missing.git'));
+  git(repo, 'update-ref', 'refs/remotes/upstream/develop', git(repo, 'rev-parse', 'HEAD'));
+  await assert.rejects(
+    rebuildBranchReview(repo, 'main', 'upstream/develop', () => {}, async () => false),
+    /Download cancelled: fresh data for branch "upstream\/develop"/,
+  );
+  assert.deepEqual(await readBranchReview(repo), initial);
 });
 
 test('rebuilds the whole review folder and detects invalid saved data', async t => {
@@ -100,7 +204,7 @@ test('rebuilds the whole review folder and detects invalid saved data', async t 
   await assert.rejects(fs.stat(path.join(root, 'stale.txt')), { code: 'ENOENT' });
   await assert.rejects(
     rebuildBranchReview(repo, 'missing-branch', 'develop', () => {}),
-    /Branch "missing-branch" was not found/,
+    /Cannot fetch branch "missing-branch" from "origin"/,
   );
   const preserved = await readBranchReview(repo);
   assert.equal(preserved.valid, true);
@@ -185,6 +289,8 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
   };
   let command;
   let focusCount = 0;
+  let warningChoice;
+  const warnings = [];
   const repositories = [
     { rootUri: { fsPath: repo }, state: { HEAD: { name: 'main' } } },
     { rootUri: { fsPath: seed }, state: { HEAD: { name: 'feature/not-fetched' } } }
@@ -202,6 +308,11 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
       activeTextEditor: { document: { uri: { fsPath: path.join(repo, 'file.txt') } } },
       createOutputChannel: () => ({ appendLine() {}, dispose() {} }),
       showErrorMessage() {},
+      showInformationMessage() {},
+      showWarningMessage(message, options, ...choices) {
+        warnings.push({ message, options, choices });
+        return Promise.resolve(warningChoice);
+      },
       registerWebviewViewProvider(id, provider, options) {
         assert.equal(id, 'branchReview.view');
         assert.equal(options.webviewOptions.retainContextWhenHidden, true);
@@ -334,6 +445,23 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
   assert.ok(elements.get('baselineBranches').children.some(option => option.value === 'main'));
   assert.equal(elements.get('baseline').value, 'custom/base');
   assert.equal(elements.get('target').value, 'custom/target');
+
+  warningChoice = 'Use Local Data';
+  const completedDownload = new Promise(resolve => { nextMessage = { type: 'done', resolve }; });
+  hostListener({ type: 'download', baseline: 'main', target: 'upstream/feature/not-fetched' });
+  await completedDownload;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(warnings.at(-1).message, /could not fetch baseline branch "main"/);
+  assert.equal(warnings.at(-1).options.modal, true);
+  assert.match(warnings.at(-1).options.detail, /refs\/remotes\/origin\/main/);
+  assert.deepEqual(warnings.at(-1).choices, ['Use Local Data']);
+  const savedReview = await readBranchReview(repo);
+  warningChoice = undefined;
+  const cancelledDownload = new Promise(resolve => { nextMessage = { type: 'error', resolve }; });
+  hostListener({ type: 'download', baseline: 'main', target: 'upstream/feature/not-fetched' });
+  assert.match((await cancelledDownload).text, /Download cancelled/);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(await readBranchReview(repo), savedReview);
 
   elements.get('form').listeners.submit({ preventDefault() {} });
   assert.equal(outbound.at(-1).baseline, 'custom/base');
