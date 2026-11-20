@@ -50,6 +50,7 @@ type WebviewMessage =
       type: "analysisStep";
       step: string;
       status: "running" | "completed" | "failed";
+      detail?: string;
     }
   | { type: "selectAnalysisModel"; modelId: string }
   | { type: "resetGuide"; profileId: string }
@@ -763,8 +764,8 @@ async function handleAnalyze(
         output?.appendLine(text);
         webview.postMessage({ type: "analysisProgress", text });
       },
-      onStep: (step, status) => {
-        webview.postMessage({ type: "analysisStep", step, status });
+      onStep: (step, status, detail) => {
+        webview.postMessage({ type: "analysisStep", step, status, detail });
       },
     });
     const modelUsage = context.globalState.get<Record<string, number>>(
@@ -901,8 +902,9 @@ function getHtml(webview: vscode.Webview): string {
     #analysisStatus { margin-top: 12px; white-space: pre-wrap; font-size: 12px; }
     #analysisProgressDialog { z-index: 30; }
     #analysisProgressSteps { list-style: none; margin: 12px 0; padding: 0; }
-    #analysisProgressSteps li { display: flex; gap: 8px; align-items: baseline; padding: 5px 0; }
-    .analysis-step-indicator { width: 1.2em; color: var(--vscode-descriptionForeground); }
+    #analysisProgressSteps li { display: grid; grid-template-columns: 1.2em 1fr; column-gap: 8px; row-gap: 2px; padding: 5px 0; }
+    .analysis-step-indicator { grid-row: span 2; color: var(--vscode-descriptionForeground); }
+    .analysis-step-detail { grid-column: 2; font-size: 11px; color: var(--vscode-descriptionForeground); }
     .analysis-step-indicator[data-status="completed"] { color: var(--vscode-testing-iconPassed); }
     .analysis-step-indicator[data-status="failed"] { color: var(--vscode-errorForeground); }
     #analysisProgressActions { display: flex; justify-content: flex-end; gap: 8px; }
@@ -959,11 +961,11 @@ function getHtml(webview: vscode.Webview): string {
       <h3 id="analysisProgressTitle">Analyzing changes</h3>
       <p id="analysisProgressMessage" class="muted" aria-live="polite">Preparing analysis...</p>
       <ul id="analysisProgressSteps">
-        <li data-step="prepare"><span class="analysis-step-indicator" aria-hidden="true">○</span><span>Prepare changed files and review context</span></li>
-        <li data-step="summary"><span class="analysis-step-indicator" aria-hidden="true">○</span><span>Generate summary and analysis report</span></li>
-        <li data-step="bugs"><span class="analysis-step-indicator" aria-hidden="true">○</span><span>Find and sort bugs by severity</span></li>
-        <li data-step="codeSmells"><span class="analysis-step-indicator" aria-hidden="true">○</span><span>Identify code smells</span></li>
-        <li data-step="save"><span class="analysis-step-indicator" aria-hidden="true">○</span><span>Save all reports</span></li>
+        <li data-step="prepare"><span class="analysis-step-indicator" aria-hidden="true">○</span><span>Prepare changed files and review context</span><span class="analysis-step-detail" aria-live="polite"></span></li>
+        <li data-step="summary"><span class="analysis-step-indicator" aria-hidden="true">○</span><span>Generate summary and analysis report</span><span class="analysis-step-detail" aria-live="polite"></span></li>
+        <li data-step="bugs"><span class="analysis-step-indicator" aria-hidden="true">○</span><span>Find and sort bugs by severity</span><span class="analysis-step-detail" aria-live="polite"></span></li>
+        <li data-step="codeSmells"><span class="analysis-step-indicator" aria-hidden="true">○</span><span>Identify code smells</span><span class="analysis-step-detail" aria-live="polite"></span></li>
+        <li data-step="save"><span class="analysis-step-indicator" aria-hidden="true">○</span><span>Save all reports</span><span class="analysis-step-detail" aria-live="polite"></span></li>
       </ul>
       <div id="analysisProgressActions">
         <button id="cancelAnalysisDialog" class="secondary" type="button">Cancel analysis</button>
@@ -1057,6 +1059,7 @@ function getHtml(webview: vscode.Webview): string {
     const analysisStatus = document.getElementById('analysisStatus');
     const analysisResults = document.getElementById('analysisResults');
     const analysisProgressDialog = document.getElementById('analysisProgressDialog');
+    const analysisProgressTitle = document.getElementById('analysisProgressTitle');
     const analysisProgressMessage = document.getElementById('analysisProgressMessage');
     const analysisProgressSteps = document.getElementById('analysisProgressSteps');
     const cancelAnalysisDialogButton = document.getElementById('cancelAnalysisDialog');
@@ -1319,6 +1322,7 @@ function getHtml(webview: vscode.Webview): string {
         const indicator = row.firstChild;
         indicator.textContent = '○';
         indicator.removeAttribute('data-status');
+        row.querySelector('.analysis-step-detail').textContent = '';
       }
       analysisProgressMessage.className = 'muted';
       analysisProgressMessage.textContent = 'Preparing analysis...';
@@ -1358,6 +1362,8 @@ function getHtml(webview: vscode.Webview): string {
       if (!profile || analyzeButton.disabled) {
         return;
       }
+      const selectedModel = analysisModels.find(model => model.id === analysisModelInput.dataset.modelId);
+      analysisProgressTitle.textContent = 'Analyzing changes with ' + (selectedModel ? selectedModel.name : 'selected model');
       analysisStatus.className = 'muted';
       analysisStatus.textContent = 'Starting analysis...';
       resetAnalysisProgress();
@@ -1540,6 +1546,7 @@ function getHtml(webview: vscode.Webview): string {
             const indicator = row.firstChild;
             indicator.textContent = message.status === 'completed' ? '✓' : message.status === 'failed' ? '!' : '…';
             indicator.setAttribute('data-status', message.status);
+            if (message.detail) row.querySelector('.analysis-step-detail').textContent = message.detail;
           }
           break;
         }

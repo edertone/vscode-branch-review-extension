@@ -682,7 +682,7 @@ test('analysis sends only profile-relevant changes and stores the report', async
   const saved = savedResults.find(result => result.id === meta.id);
   assert.ok(saved);
   assert.equal(saved.id, meta.id);
-  assert.equal(path.dirname(meta.reportFile), meta.createdAt.replace(/[:.]/g, '-'));
+  assert.match(path.dirname(meta.reportFile), new RegExp(`^${meta.createdAt.replace(/[:.]/g, '-')}-Fake-model$`));
   const resultDirectory = path.join(resultsRoot(repo), path.dirname(meta.reportFile));
   const savedFiles = await fs.readdir(resultDirectory);
   assert.ok(savedFiles.includes(`${meta.id}.json`));

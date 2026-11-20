@@ -47,7 +47,7 @@ export interface AnalysisRequest {
   countTokens: (prompt: string, signal: AbortSignal) => Promise<number>;
   sendPrompt: (prompt: string, signal: AbortSignal) => Promise<string>;
   onProgress: (text: string) => void;
-  onStep?: (step: 'prepare' | 'summary' | 'bugs' | 'codeSmells' | 'save', status: 'running' | 'completed' | 'failed') => void;
+  onStep?: (step: 'prepare' | 'summary' | 'bugs' | 'codeSmells' | 'save', status: 'running' | 'completed' | 'failed', detail?: string) => void;
 }
 
 export interface AnalysisReport {
@@ -167,7 +167,7 @@ async function readChanges(repoRoot: string): Promise<{
 /** Sends three focused reviews against the shared patch context and stores all reports together. */
 export async function runAnalysis(request: AnalysisRequest): Promise<AnalysisResultMeta> {
   const { repoRoot, profile, guide, model, signal, countTokens, sendPrompt, onProgress, onStep = () => {} } = request;
-  onStep('prepare', 'running');
+  onStep('prepare', 'running', 'Loading changed files and patches');
   const { baseline, target, changes } = await readChanges(repoRoot);
   const relevant = changes.filter(change => isRelevantToProfile(profile,
     (change.newPath ?? change.oldPath) as string));
@@ -176,6 +176,7 @@ export async function runAnalysis(request: AnalysisRequest): Promise<AnalysisRes
   }
 
   const { sections, skippedFiles, partialFiles } = await buildSections(repoRoot, relevant);
+  const dataSize = sections.reduce((total, section) => total + Buffer.byteLength(section.text, 'utf8'), 0);
   const kinds: AnalysisReportKind[] = ['summary', 'bugs', 'codeSmells'];
   const prompts = kinds.map(kind => ({
     kind,
@@ -191,12 +192,12 @@ export async function runAnalysis(request: AnalysisRequest): Promise<AnalysisRes
       throw new Error(`The ${relevant.length} changed files are too large for ${model.name} in one request (${tokens} tokens; the per-request limit is ${limit}). Use a model with a larger input window or narrow the branches.`);
     }
   }
-  onStep('prepare', 'completed');
+  onStep('prepare', 'completed', `${relevant.length} files · ${(dataSize / 1024).toFixed(1)} KB of patch data · ${prompts[0].prompt.length.toLocaleString()} characters per report`);
 
   const reports: AnalysisReport[] = [];
   for (const { kind, prompt } of prompts) {
     if (signal.aborted) throw new Error('Analysis cancelled.');
-    onStep(kind, 'running');
+    onStep(kind, 'running', `${relevant.length} files · ${(dataSize / 1024).toFixed(1)} KB of patch data · ${prompt.length.toLocaleString()} characters sent to ${model.name}`);
     onProgress(`Generating ${kind === 'codeSmells' ? 'code smells' : kind} report (${reports.length + 1} of ${prompts.length}) with ${model.name}...`);
     try {
       reports.push({ kind, title: reportTitle(kind), content: (await sendPrompt(prompt, signal)).trim() });
@@ -207,12 +208,13 @@ export async function runAnalysis(request: AnalysisRequest): Promise<AnalysisRes
       throw error;
     }
   }
-  onStep('save', 'running');
   if (signal.aborted) throw new Error('Analysis cancelled.');
 
   const createdAt = new Date();
   const id = `${createdAt.toISOString().replace(/[:.]/g, '-')}-${profile.id}-${randomUUID().slice(0, 6)}`;
-  const resultFolder = createdAt.toISOString().replace(/[:.]/g, '-');
+  const resultFolder = `${createdAt.toISOString().replace(/[:.]/g, '-')}-${model.name.replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'model'}`;
+  const reportDataSize = reports.reduce((total, report) => total + Buffer.byteLength(report.content, 'utf8'), 0);
+  onStep('save', 'running', `${reports.length} reports · ${(reportDataSize / 1024).toFixed(1)} KB of generated report data · ${resultFolder}`);
   const reportFiles = Object.fromEntries(reports.map(report => [report.kind, `${resultFolder}/${id}-${report.kind}.md`])) as Record<AnalysisReportKind, string>;
   const meta: AnalysisResultMeta = {
     schemaVersion: 1,
@@ -315,7 +317,7 @@ export async function listAnalysisResults(repoRoot: string): Promise<AnalysisRes
       for (const name of names.filter(file => file.endsWith('.json'))) {
         try {
           const data: unknown = JSON.parse(await fs.readFile(path.join(directory, folder, name), 'utf8'));
-          if (!isAnalysisResultMeta(data) || path.dirname(data.reportFile) !== folder || (data.reportFiles && Object.values(data.reportFiles).some(reportFile => path.dirname(reportFile) !== folder)) || !/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/.test(folder)) continue;
+          if (!isAnalysisResultMeta(data) || path.dirname(data.reportFile) !== folder || (data.reportFiles && Object.values(data.reportFiles).some(reportFile => path.dirname(reportFile) !== folder)) || !/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z(?:-[A-Za-z0-9_-]{1,48})?$/.test(folder)) continue;
           await fs.access(path.join(directory, data.reportFile));
           if (data.reportFiles) {
             await Promise.all(Object.values(data.reportFiles).map(reportFile => fs.access(path.join(directory, reportFile))));
@@ -344,11 +346,11 @@ function isAnalysisResultMeta(value: unknown): value is AnalysisResultMeta {
   const meta = value as Record<string, unknown>;
   return meta.schemaVersion === 1 && typeof meta.id === 'string' &&
     typeof meta.createdAt === 'string' && typeof meta.profileLabel === 'string' &&
-    typeof meta.reportFile === 'string' && /^(?:\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\/)?[A-Za-z0-9][A-Za-z0-9._-]*\.md$/.test(meta.reportFile) &&
+    typeof meta.reportFile === 'string' && /^(?:\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z(?:-[A-Za-z0-9_-]{1,48})?\/)?[A-Za-z0-9][A-Za-z0-9._-]*\.md$/.test(meta.reportFile) &&
     (meta.reportFiles === undefined || (typeof meta.reportFiles === 'object' && meta.reportFiles !== null &&
       ['summary', 'bugs', 'codeSmells'].every(kind => typeof (meta.reportFiles as Record<string, unknown>)[kind] === 'string' &&
         (meta.reportFiles as Record<string, unknown>)[kind] === (meta.reportFile as string).replace(/-summary\.md$/, `-${kind}.md`) &&
-        /^(?:\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\/)?[A-Za-z0-9][A-Za-z0-9._-]*\.md$/.test((meta.reportFiles as Record<string, unknown>)[kind] as string)))) &&
+        /^(?:\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z(?:-[A-Za-z0-9_-]{1,48})?\/)?[A-Za-z0-9][A-Za-z0-9._-]*\.md$/.test((meta.reportFiles as Record<string, unknown>)[kind] as string)))) &&
     typeof meta.model === 'object' && meta.model !== null &&
     typeof (meta.model as Record<string, unknown>).name === 'string' &&
     typeof meta.baseline === 'object' && meta.baseline !== null &&
