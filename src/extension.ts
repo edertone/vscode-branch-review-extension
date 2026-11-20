@@ -467,7 +467,9 @@ function getHtml(webview: vscode.Webview): string {
     .modal { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 20px; background: var(--vscode-editor-background); }
     .modal[hidden], [hidden] { display: none !important; }
     .modal-content { width: min(520px, 100%); max-height: 90vh; overflow: auto; padding: 20px; background: var(--vscode-sideBar-background, var(--vscode-editor-background)); border: 1px solid var(--vscode-panel-border); box-shadow: 0 8px 32px #0006; }
-    .modal-actions { display: flex; flex-wrap: wrap; align-items: center; }
+    .modal-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; }
+    .modal-actions .secondary { margin-left: 0; }
+    .modal-actions-end { display: flex; align-items: center; gap: 8px; }
   </style>
 </head>
 <body>
@@ -500,8 +502,10 @@ function getHtml(webview: vscode.Webview): string {
         </div>
         <div class="modal-actions">
           <button id="refresh" class="secondary" type="button" disabled>Refresh branches</button>
-          <button id="download" type="submit" disabled>Download</button>
-          <button id="cancel" class="secondary" type="button" hidden>Cancel</button>
+          <div class="modal-actions-end">
+            <button id="cancel" class="secondary" type="button" hidden>Cancel</button>
+            <button id="download" type="submit" disabled>Download</button>
+          </div>
         </div>
       </form>
       <div id="modalStatus" class="muted" aria-live="polite"></div>
