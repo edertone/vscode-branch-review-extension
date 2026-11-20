@@ -2,27 +2,47 @@
   "name": "branch-review",
   "displayName": "Branch Review",
   "description": "Download two git branches into .branchReview/ for side-by-side review.",
-  "version": "0.1.5",
+  "version": "0.1.7",
   "publisher": "local-dev",
   "private": true,
   "license": "MIT",
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.106.0"
   },
   "categories": [
     "SCM Providers",
     "Other"
   ],
   "main": "./out/extension.js",
-  "activationEvents": [],
+  "activationEvents": [
+    "onView:branchReview.view"
+  ],
   "contributes": {
     "commands": [
       {
         "command": "branchReview.open",
-        "title": "Branch Review: Open Panel",
+        "title": "Branch Review: Open View",
         "category": "Branch Review"
       }
-    ]
+    ],
+    "viewsContainers": {
+      "secondarySidebar": [
+        {
+          "id": "branchReview",
+          "title": "Branch Review",
+          "icon": "$(git-compare)"
+        }
+      ]
+    },
+    "views": {
+      "branchReview": [
+        {
+          "id": "branchReview.view",
+          "name": "Branch Review",
+          "type": "webview"
+        }
+      ]
+    }
   },
   "scripts": {
     "build": "npm install && npm run compile && npm run package",

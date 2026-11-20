@@ -10,6 +10,7 @@ import {
 } from "./git";
 
 const DEFAULT_BASELINE_BRANCH = "develop";
+const VIEW_ID = "branchReview.view";
 
 interface GitRepository {
   rootUri: vscode.Uri;
@@ -30,21 +31,32 @@ type WebviewMessage =
   | { type: "download"; baseline: string; target: string }
   | { type: "clear" };
 
-let panel: vscode.WebviewPanel | undefined;
 let output: vscode.OutputChannel | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel("Branch Review");
   context.subscriptions.push(
     output,
-    vscode.commands.registerCommand("branchReview.open", () =>
-      openPanel(context),
+    vscode.window.registerWebviewViewProvider(
+      VIEW_ID,
+      { resolveWebviewView: (view) => resolveView(context, view) },
+      { webviewOptions: { retainContextWhenHidden: true } },
     ),
+    vscode.commands.registerCommand("branchReview.open", () => openView()),
   );
 }
 
-export function deactivate(): void {
-  panel?.dispose();
+async function openView(): Promise<void> {
+  const repo = await findRepository(
+    vscode.window.activeTextEditor?.document.uri.fsPath,
+  );
+  if (!repo) {
+    vscode.window.showErrorMessage(
+      "Branch Review: no git repository found in the workspace.",
+    );
+    return;
+  }
+  await vscode.commands.executeCommand(`${VIEW_ID}.focus`);
 }
 
 async function getGitApi(): Promise<GitApi | undefined> {
@@ -60,7 +72,10 @@ async function getGitApi(): Promise<GitApi | undefined> {
 }
 
 /** Picks the repository of the active editor, falling back to the first open repository. */
-async function findRepository(activeFile?: string, fallback = true): Promise<GitRepository | undefined> {
+async function findRepository(
+  activeFile?: string,
+  fallback = true,
+): Promise<GitRepository | undefined> {
   const api = await getGitApi();
   const repos = api?.repositories ?? [];
   if (repos.length === 0) {
@@ -81,27 +96,13 @@ async function findRepository(activeFile?: string, fallback = true): Promise<Git
   return fallback ? repos[0] : undefined;
 }
 
-async function openPanel(context: vscode.ExtensionContext): Promise<void> {
-  if (panel) {
-    panel.reveal();
-    return;
-  }
-
-  const repo = await findRepository(vscode.window.activeTextEditor?.document.uri.fsPath);
-  if (!repo) {
-    vscode.window.showErrorMessage(
-      "Branch Review: no git repository found in the workspace.",
-    );
-    return;
-  }
-  panel = vscode.window.createWebviewPanel(
-    "branchReview",
-    "Branch Review",
-    vscode.ViewColumn.Active,
-    { enableScripts: true, retainContextWhenHidden: true },
-  );
-  const currentPanel = panel;
-  let currentRepo = repo;
+function resolveView(
+  context: vscode.ExtensionContext,
+  currentView: vscode.WebviewView,
+): void {
+  const webview = currentView.webview;
+  webview.options = { enableScripts: true };
+  let currentRepo: GitRepository | undefined;
   let revision = 0;
   let editorRevision = 0;
   let busy = false;
@@ -111,22 +112,41 @@ async function openPanel(context: vscode.ExtensionContext): Promise<void> {
   let folderWatcher: vscode.FileSystemWatcher | undefined;
   let folderChangeTimer: ReturnType<typeof setTimeout> | undefined;
   let refreshFolderAfterAction = false;
+  const viewSubscriptions: vscode.Disposable[] = [];
+
+  const disposeView = () => {
+    if (disposed) return;
+    disposed = true;
+    folderWatcher?.dispose();
+    if (folderChangeTimer) clearTimeout(folderChangeTimer);
+    for (const subscription of viewSubscriptions) {
+      subscription.dispose();
+    }
+  };
+  context.subscriptions.push({ dispose: disposeView });
+  viewSubscriptions.push(currentView.onDidDispose(disposeView));
 
   const syncReviewState = () => {
+    if (!currentRepo) return;
     if (busy) {
       refreshFolderAfterAction = true;
       return;
     }
     const selectedRepo = currentRepo;
     const selectedRevision = revision;
-    void readBranchReview(selectedRepo.rootUri.fsPath).then((review) => {
-      if (!disposed && selectedRevision === revision) {
-        void currentPanel.webview.postMessage({ type: "reviewState", review });
-      }
-    }, (err: Error) => {
-      output?.appendLine(`Error reading .branchReview: ${err.message}`);
-      vscode.window.showErrorMessage(`Branch Review: unable to read .branchReview: ${err.message}`);
-    });
+    void readBranchReview(selectedRepo.rootUri.fsPath).then(
+      (review) => {
+        if (!disposed && selectedRevision === revision) {
+          void webview.postMessage({ type: "reviewState", review });
+        }
+      },
+      (err: Error) => {
+        output?.appendLine(`Error reading .branchReview: ${err.message}`);
+        vscode.window.showErrorMessage(
+          `Branch Review: unable to read .branchReview: ${err.message}`,
+        );
+      },
+    );
   };
   const watchRepository = (selectedRepo: GitRepository) => {
     folderWatcher?.dispose();
@@ -149,22 +169,25 @@ async function openPanel(context: vscode.ExtensionContext): Promise<void> {
   };
 
   const loadRepository = () => {
+    if (!currentRepo) return;
     const selectedRepo = currentRepo;
     const selectedRevision = ++revision;
     watchRepository(selectedRepo);
-    void currentPanel.webview.postMessage({
+    void webview.postMessage({
       type: "project",
       name: path.basename(selectedRepo.rootUri.fsPath),
       repoRoot: selectedRepo.rootUri.fsPath,
     });
-    void initializePanel(currentPanel.webview, selectedRepo, () =>
-      !disposed && selectedRevision === revision,
+    void initializePanel(
+      webview,
+      selectedRepo,
+      () => !disposed && selectedRevision === revision,
     );
   };
   const selectRepository = (selectedRepo: GitRepository) => {
     if (busy) {
       pendingRepo = selectedRepo;
-    } else if (selectedRepo.rootUri.fsPath !== currentRepo.rootUri.fsPath) {
+    } else if (selectedRepo.rootUri.fsPath !== currentRepo?.rootUri.fsPath) {
       currentRepo = selectedRepo;
       if (ready) loadRepository();
     }
@@ -172,36 +195,77 @@ async function openPanel(context: vscode.ExtensionContext): Promise<void> {
   const editorListener = vscode.window.onDidChangeActiveTextEditor((editor) => {
     if (!editor) return;
     const selectedRevision = ++editorRevision;
-    void findRepository(editor.document.uri.fsPath, false).then((selectedRepo) => {
-      if (!disposed && selectedRevision === editorRevision && selectedRepo) {
-        selectRepository(selectedRepo);
-      }
-    }, (err: Error) => {
-      output?.appendLine(`Error selecting repository: ${err.message}`);
-      vscode.window.showErrorMessage(`Branch Review: unable to select repository: ${err.message}`);
-    });
+    void findRepository(editor.document.uri.fsPath, false).then(
+      (selectedRepo) => {
+        if (!disposed && selectedRevision === editorRevision && selectedRepo) {
+          selectRepository(selectedRepo);
+        }
+      },
+      (err: Error) => {
+        output?.appendLine(`Error selecting repository: ${err.message}`);
+        vscode.window.showErrorMessage(
+          `Branch Review: unable to select repository: ${err.message}`,
+        );
+      },
+    );
   });
-  currentPanel.onDidDispose(() => {
-    disposed = true;
-    folderWatcher?.dispose();
-    if (folderChangeTimer) clearTimeout(folderChangeTimer);
-    editorListener.dispose();
-    if (panel === currentPanel) panel = undefined;
-  }, null, context.subscriptions);
+  viewSubscriptions.push(editorListener);
 
-  currentPanel.webview.onDidReceiveMessage(
-    (message: WebviewMessage) => {
+  viewSubscriptions.push(
+    currentView.onDidChangeVisibility(() => {
+      if (currentView.visible) {
+        syncReviewState();
+      }
+    }),
+  );
+
+  viewSubscriptions.push(
+    webview.onDidReceiveMessage((message: WebviewMessage) => {
       if (message.type === "ready") {
         ready = true;
-        loadRepository();
+        const selectedEditorRevision = ++editorRevision;
+        void findRepository(
+          vscode.window.activeTextEditor?.document.uri.fsPath,
+        ).then(
+          (selectedRepo) => {
+            if (disposed || selectedEditorRevision !== editorRevision) return;
+            if (selectedRepo) {
+              currentRepo = selectedRepo;
+              loadRepository();
+            } else if (!currentRepo) {
+              const text =
+                "Branch Review: no git repository found in the workspace.";
+              vscode.window.showErrorMessage(text);
+              void webview.postMessage({
+                type: "initError",
+                text,
+                review: { valid: false, reason: text },
+              });
+            }
+          },
+          (err: Error) => {
+            output?.appendLine(`Error selecting repository: ${err.message}`);
+            vscode.window.showErrorMessage(
+              `Branch Review: unable to select repository: ${err.message}`,
+            );
+          },
+        );
       } else if (!busy) {
+        if (!currentRepo) {
+          void webview.postMessage({
+            type: "error",
+            text: "No Git repository is available for Branch Review.",
+          });
+          return;
+        }
         busy = true;
         const repoRoot = currentRepo.rootUri.fsPath;
-        const action = message.type === "refresh"
-          ? refreshBranches(currentPanel.webview, repoRoot)
-          : message.type === "clear"
-            ? handleClear(currentPanel.webview, repoRoot)
-            : handleDownload(currentPanel.webview, message, repoRoot);
+        const action =
+          message.type === "refresh"
+            ? refreshBranches(webview, repoRoot)
+            : message.type === "clear"
+              ? handleClear(webview, repoRoot)
+              : handleDownload(webview, message, repoRoot);
         void action.finally(() => {
           busy = false;
           if (pendingRepo) {
@@ -214,11 +278,9 @@ async function openPanel(context: vscode.ExtensionContext): Promise<void> {
           }
         });
       }
-    },
-    undefined,
-    context.subscriptions,
+    }),
   );
-  currentPanel.webview.html = getHtml(currentPanel.webview);
+  webview.html = getHtml(webview);
 }
 
 async function initializePanel(
@@ -256,7 +318,10 @@ async function initializePanel(
   }
 }
 
-async function refreshBranches(webview: vscode.Webview, repoRoot: string): Promise<void> {
+async function refreshBranches(
+  webview: vscode.Webview,
+  repoRoot: string,
+): Promise<void> {
   webview.postMessage({ type: "refreshing", refreshing: true });
   try {
     const { branches, warnings } = await listBranches(repoRoot);
@@ -273,7 +338,10 @@ async function refreshBranches(webview: vscode.Webview, repoRoot: string): Promi
   }
 }
 
-async function handleClear(webview: vscode.Webview, repoRoot: string): Promise<void> {
+async function handleClear(
+  webview: vscode.Webview,
+  repoRoot: string,
+): Promise<void> {
   const confirm = await vscode.window.showWarningMessage(
     "Delete the .branchReview folder and all downloaded branches?",
     { modal: true },
@@ -336,7 +404,12 @@ async function handleDownload(
   try {
     log(`Downloading baseline "${branches[0]}"`);
     log(`Downloading baseline "${branches[0]}"`);
-    const review = await rebuildBranchReview(repoRoot, branches[0], branches[1], log);
+    const review = await rebuildBranchReview(
+      repoRoot,
+      branches[0],
+      branches[1],
+      log,
+    );
     const summary = `Downloaded baseline "${review.baseline.branch}" and target "${review.target.branch}" to ${path.join(repoRoot, BRANCH_REVIEW_DIR)}`;
     output?.appendLine(summary);
     webview.postMessage({ type: "reviewState", review });
@@ -420,7 +493,7 @@ function getHtml(webview: vscode.Webview): string {
           <input id="baseline" autocomplete="off" placeholder="Type or select a branch">
           <select id="baselineBranches" aria-label="Select baseline branch" disabled></select>
         </div>
-        <label for="target">Target branch (new code changes)</label>
+        <label for="target">Target branch (new code to review)</label>
         <div class="branch-row">
           <input id="target" autocomplete="off" placeholder="Type or select a branch">
           <select id="targetBranches" aria-label="Select target branch" disabled></select>

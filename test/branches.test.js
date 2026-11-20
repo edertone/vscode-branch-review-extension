@@ -6,6 +6,7 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 const Module = require('node:module');
+const extensionManifest = require('../package.json');
 const {
   branchReviewRoot,
   listBranches,
@@ -117,6 +118,10 @@ test('rebuilds the whole review folder and detects invalid saved data', async t 
 
 test('webview initializes, shares branch suggestions, and accepts typed names', async t => {
   const { repo, seed } = await fixture(t);
+  const [container] = extensionManifest.contributes.viewsContainers.secondarySidebar;
+  assert.equal(container.id, 'branchReview');
+  assert.equal(extensionManifest.contributes.views[container.id][0].id, 'branchReview.view');
+  assert.equal(extensionManifest.contributes.views[container.id][0].type, 'webview');
   const elements = new Map();
   function element(id) {
     return {
@@ -148,7 +153,7 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
   let initialized;
   const init = new Promise(resolve => { initialized = resolve; });
   const webview = {
-    onDidReceiveMessage(callback) { hostListener = callback; },
+    onDidReceiveMessage(callback) { hostListener = callback; return { dispose() {} }; },
     postMessage(message) {
       webviewListener({ data: message });
       if (message.type === 'init' || message.type === 'initError') initialized(message);
@@ -159,7 +164,13 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
       return Promise.resolve(true);
     }
   };
-  const panel = { webview, onDidDispose() {}, reveal() {}, dispose() {} };
+  let viewDisposed;
+  const view = {
+    webview,
+    visible: true,
+    onDidDispose(callback) { viewDisposed = callback; return { dispose() {} }; },
+    onDidChangeVisibility() { return { dispose() {} }; }
+  };
   const watcherEvents = {};
   const watcher = {
     onDidCreate(callback) { watcherEvents.create = callback; },
@@ -168,6 +179,7 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
     dispose() {}
   };
   let command;
+  let focusCount = 0;
   const vscode = {
     extensions: { getExtension: () => ({ isActive: true, exports: { getAPI: () => ({
       repositories: [
@@ -177,16 +189,28 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
     }) } }) },
     window: {
       createOutputChannel: () => ({ appendLine() {}, dispose() {} }),
-      createWebviewPanel: () => panel,
+      registerWebviewViewProvider(id, provider, options) {
+        assert.equal(id, 'branchReview.view');
+        assert.equal(options.webviewOptions.retainContextWhenHidden, true);
+        viewProvider = provider;
+        return { dispose() {} };
+      },
       onDidChangeActiveTextEditor(callback) { editorListener = callback; return { dispose() {} }; }
     },
     workspace: { createFileSystemWatcher: () => watcher },
     RelativePattern: class {
       constructor(base, pattern) { this.base = base; this.pattern = pattern; }
     },
-    commands: { registerCommand(name, callback) { command = callback; return { dispose() {} }; } },
-    ViewColumn: { Active: 1 }
+    commands: {
+      registerCommand(name, callback) { command = callback; return { dispose() {} }; },
+      executeCommand(name) {
+        assert.equal(name, 'branchReview.view.focus');
+        if (focusCount++ === 0) viewProvider.resolveWebviewView(view, {}, {});
+        return Promise.resolve();
+      }
+    }
   };
+  let viewProvider;
   const originalLoad = Module._load;
   let extension;
   try {
@@ -198,8 +222,10 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
     Module._load = originalLoad;
   }
   extension.activate({ subscriptions: [] });
-  t.after(() => extension.deactivate());
+  t.after(() => viewDisposed?.());
   await command();
+  await command();
+  assert.equal(focusCount, 2);
   assert.match(webview.html, /<select id="baselineBranches"/);
   assert.match(webview.html, /<select id="targetBranches"/);
   const script = webview.html.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)[1];
