@@ -742,8 +742,13 @@ async function openAnalysisReport(repoRoot: string, id: string): Promise<void> {
     );
     return;
   }
-  const reportPath = path.join(resultsRoot(repoRoot), `${id}.md`);
   try {
+    const result = (await listAnalysisResults(repoRoot)).find((entry) => entry.id === id);
+    if (!result) {
+      vscode.window.showErrorMessage("Branch Review: analysis report not found.");
+      return;
+    }
+    const reportPath = path.join(resultsRoot(repoRoot), result.reportFile);
     const document = await vscode.workspace.openTextDocument(
       vscode.Uri.file(reportPath),
     );

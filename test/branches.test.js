@@ -649,6 +649,9 @@ test('analysis sends only profile-relevant changes and stores the report', async
 
   const [saved] = await listAnalysisResults(repo);
   assert.equal(saved.id, meta.id);
+  assert.equal(path.dirname(meta.reportFile), meta.createdAt.replace(/[:.]/g, '-'));
+  const resultDirectory = path.join(resultsRoot(repo), path.dirname(meta.reportFile));
+  assert.ok((await fs.readdir(resultDirectory)).includes(`${meta.id}.json`));
   assert.match(await fs.readFile(path.join(resultsRoot(repo), meta.reportFile), 'utf8'), /Looks fine\./);
 
   await assert.rejects(runAnalysis({

@@ -174,7 +174,8 @@ export async function runAnalysis(request: AnalysisRequest): Promise<AnalysisRes
 
   const createdAt = new Date();
   const id = `${createdAt.toISOString().replace(/[:.]/g, '-')}-${profile.id}-${randomUUID().slice(0, 6)}`;
-  const reportFile = `${id}.md`;
+  const resultFolder = createdAt.toISOString().replace(/[:.]/g, '-');
+  const reportFile = `${resultFolder}/${id}.md`;
   const meta: AnalysisResultMeta = {
     schemaVersion: 1,
     id,
@@ -205,9 +206,9 @@ export async function runAnalysis(request: AnalysisRequest): Promise<AnalysisRes
     '',
   ].join('\n');
 
-  const directory = resultsRoot(repoRoot);
+  const directory = path.join(resultsRoot(repoRoot), resultFolder);
   await fs.mkdir(directory, { recursive: true });
-  await writeFileAtomic(path.join(directory, reportFile), `${header}\n${response || '_The model returned no content._'}\n`);
+  await writeFileAtomic(path.join(directory, path.basename(reportFile)), `${header}\n${response || '_The model returned no content._'}\n`);
   await writeFileAtomic(path.join(directory, `${id}.json`), JSON.stringify(meta, null, 2) + '\n');
   onProgress(`Analysis saved to ${RESULTS_DIR}/${reportFile}.`);
   return meta;
@@ -222,21 +223,41 @@ async function writeFileAtomic(file: string, content: string): Promise<void> {
 /** Lists saved analyses, newest first. Entries whose report is missing or malformed are skipped. */
 export async function listAnalysisResults(repoRoot: string): Promise<AnalysisResultMeta[]> {
   const directory = resultsRoot(repoRoot);
-  let names: string[];
+  let entries: import('fs').Dirent[];
   try {
-    names = await fs.readdir(directory);
+    entries = await fs.readdir(directory, { withFileTypes: true });
   } catch {
     return [];
   }
   const results: AnalysisResultMeta[] = [];
-  for (const name of names.filter(file => file.endsWith('.json'))) {
-    try {
-      const data: unknown = JSON.parse(await fs.readFile(path.join(directory, name), 'utf8'));
-      if (!isAnalysisResultMeta(data)) continue;
-      await fs.access(path.join(directory, data.reportFile));
-      results.push(data);
-    } catch {
-      continue;
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      const folder = entry.name;
+      let names: string[];
+      try {
+        names = await fs.readdir(path.join(directory, folder));
+      } catch {
+        continue;
+      }
+      for (const name of names.filter(file => file.endsWith('.json'))) {
+        try {
+          const data: unknown = JSON.parse(await fs.readFile(path.join(directory, folder, name), 'utf8'));
+          if (!isAnalysisResultMeta(data) || path.dirname(data.reportFile) !== folder || !/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/.test(folder)) continue;
+          await fs.access(path.join(directory, data.reportFile));
+          results.push(data);
+        } catch {
+          continue;
+        }
+      }
+    } else if (entry.isFile() && entry.name.endsWith('.json')) {
+      try {
+        const data: unknown = JSON.parse(await fs.readFile(path.join(directory, entry.name), 'utf8'));
+        if (!isAnalysisResultMeta(data) || path.dirname(data.reportFile) !== '.') continue;
+        await fs.access(path.join(directory, data.reportFile));
+        results.push(data);
+      } catch {
+        continue;
+      }
     }
   }
   return results.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -247,7 +268,7 @@ function isAnalysisResultMeta(value: unknown): value is AnalysisResultMeta {
   const meta = value as Record<string, unknown>;
   return meta.schemaVersion === 1 && typeof meta.id === 'string' &&
     typeof meta.createdAt === 'string' && typeof meta.profileLabel === 'string' &&
-    typeof meta.reportFile === 'string' && /^[A-Za-z0-9._-]+\.md$/.test(meta.reportFile) &&
+    typeof meta.reportFile === 'string' && /^(?:\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\/)?[A-Za-z0-9][A-Za-z0-9._-]*\.md$/.test(meta.reportFile) &&
     typeof meta.model === 'object' && meta.model !== null &&
     typeof (meta.model as Record<string, unknown>).name === 'string' &&
     typeof meta.baseline === 'object' && meta.baseline !== null &&
