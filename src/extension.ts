@@ -329,6 +329,9 @@ function getHtml(webview: vscode.Webview): string {
     }
     input:focus, select:focus { border-color: var(--vscode-focusBorder); }
     select { margin-top: 4px; }
+    .branch-row { display: flex; gap: 8px; }
+    .branch-row input { flex: 1; min-width: 0; }
+    .branch-row select { flex: 0 0 42%; min-width: 0; margin-top: 0; }
     button {
       margin-top: 18px; padding: 6px 14px; cursor: pointer;
       background: var(--vscode-button-background); color: var(--vscode-button-foreground);
@@ -349,11 +352,15 @@ function getHtml(webview: vscode.Webview): string {
   <div id="project" class="muted">Loading project...</div>
   <form id="form">
     <label for="baseline">Baseline branch (old code)</label>
-    <input id="baseline" autocomplete="off" placeholder="Type or select a branch">
-    <select id="baselineBranches" aria-label="Select baseline branch" disabled></select>
+    <div class="branch-row">
+      <input id="baseline" autocomplete="off" placeholder="Type or select a branch">
+      <select id="baselineBranches" aria-label="Select baseline branch" disabled></select>
+    </div>
     <label for="target">Target branch (new code changes)</label>
-    <input id="target" autocomplete="off" placeholder="Type or select a branch">
-    <select id="targetBranches" aria-label="Select target branch" disabled></select>
+    <div class="branch-row">
+      <input id="target" autocomplete="off" placeholder="Type or select a branch">
+      <select id="targetBranches" aria-label="Select target branch" disabled></select>
+    </div>
     <button id="refresh" type="button" disabled>Refresh branches</button>
     <button id="download" type="submit" disabled>Download</button>
     <button id="clear" type="button">Clear .branchReview</button>
