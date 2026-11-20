@@ -46,6 +46,7 @@ export interface AnalysisRequest {
   signal: AbortSignal;
   sendPrompt: (prompt: string, signal: AbortSignal) => Promise<string>;
   onProgress: (text: string) => void;
+  onStep?: (step: 'prepare' | 'summary' | 'bugs' | 'codeSmells' | 'save', status: 'running' | 'completed' | 'failed') => void;
 }
 
 export interface AnalysisReport {
@@ -177,7 +178,8 @@ async function readChanges(repoRoot: string): Promise<{
 
 /** Sends three focused reviews against the shared patch context and stores all reports together. */
 export async function runAnalysis(request: AnalysisRequest): Promise<AnalysisResultMeta> {
-  const { repoRoot, profile, guide, model, signal, sendPrompt, onProgress } = request;
+  const { repoRoot, profile, guide, model, signal, sendPrompt, onProgress, onStep = () => {} } = request;
+  onStep('prepare', 'running');
   const { baseline, target, changes } = await readChanges(repoRoot);
   const relevant = changes.filter(change => isRelevantToProfile(profile,
     (change.newPath ?? change.oldPath) as string));
@@ -197,18 +199,23 @@ export async function runAnalysis(request: AnalysisRequest): Promise<AnalysisRes
   if (oversized) {
     throw new Error(`The ${relevant.length} changed files are too large for ${model.name} in one request (about ${Math.ceil(oversized.prompt.length / CHARS_PER_TOKEN)} tokens; the per-request limit is about ${Math.floor(limit / CHARS_PER_TOKEN)}). Use a model with a larger input window or narrow the branches.`);
   }
+  onStep('prepare', 'completed');
 
   const reports: AnalysisReport[] = [];
   for (const { kind, prompt } of prompts) {
     if (signal.aborted) throw new Error('Analysis cancelled.');
+    onStep(kind, 'running');
     onProgress(`Generating ${kind === 'codeSmells' ? 'code smells' : kind} report (${reports.length + 1} of ${prompts.length}) with ${model.name}...`);
     try {
       reports.push({ kind, title: reportTitle(kind), content: (await sendPrompt(prompt, signal)).trim() });
+      onStep(kind, 'completed');
     } catch (error) {
+      onStep(kind, 'failed');
       if (signal.aborted) throw new Error('Analysis cancelled.');
       throw error;
     }
   }
+  onStep('save', 'running');
   if (signal.aborted) throw new Error('Analysis cancelled.');
 
   const createdAt = new Date();
@@ -264,6 +271,7 @@ export async function runAnalysis(request: AnalysisRequest): Promise<AnalysisRes
   } finally {
     await fs.rm(stagingDirectory, { recursive: true, force: true });
   }
+  onStep('save', 'completed');
   onProgress(`Analysis reports saved to ${RESULTS_DIR}/${resultFolder}/.`);
   return meta;
 }

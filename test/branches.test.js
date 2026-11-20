@@ -318,9 +318,9 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
     'clear', 'refresh', 'chooseBranches', 'cancel', 'project', 'reviewSummary', 'status',
     'modalStatus', 'modalTitle', 'analysisTab', 'resultsTab', 'branchesTab', 'analysisPanel', 'resultsPanel', 'branchesPanel',
     'reviewTabs', 'reviewDetails', 'changedFiles', 'noReview',
-    'selectionModal', 'form', 'analysisModelInput', 'analysisModelCount', 'selectAnalysisModel', 'analysisModelDialog',
+    'selectionModal', 'form', 'analysisModelInput', 'selectAnalysisModel', 'analysisModelDialog',
     'analysisModelSearch', 'analysisModelList', 'analysisModelDialogStatus', 'cancelAnalysisModel', 'confirmAnalysisModel',
-    'analysisProfile', 'analysisGuide', 'analyze', 'cancelAnalysis', 'resetGuide', 'analysisStatus', 'analysisResults'
+    'analysisProfile', 'analysisGuide', 'analyze', 'resetGuide', 'analysisStatus', 'analysisResults', 'analysisProgressDialog', 'analysisProgressMessage', 'analysisProgressSteps', 'cancelAnalysisDialog', 'closeAnalysisDialog', 'analysisActions'
   ]) {
     elements.set(id, element(id));
   }
@@ -632,6 +632,7 @@ test('analysis sends only profile-relevant changes and stores the report', async
   await rebuildBranchReview(repo, 'main', 'origin/feature/not-fetched', () => {});
 
   const prompts = [];
+  const progress = [];
   const meta = await runAnalysis({
     repoRoot: repo,
     profile: findAnalysisProfile('angular'),
@@ -640,7 +641,8 @@ test('analysis sends only profile-relevant changes and stores the report', async
     model: { id: 'fake', name: 'Fake model' },
     signal: new AbortController().signal,
     sendPrompt: async prompt => { prompts.push(prompt); return `Report ${prompts.length}`; },
-    onProgress() {}
+    onProgress() {},
+    onStep: (step, status) => progress.push({ step, status })
   });
   assert.equal(prompts.length, 3);
   for (const prompt of prompts) {
@@ -656,6 +658,13 @@ test('analysis sends only profile-relevant changes and stores the report', async
   assert.equal(meta.relevantFiles, 1);
   assert.equal(meta.modelCalls, 3);
   assert.equal(meta.batches, 1);
+  assert.deepEqual(progress.map(step => `${step.step}:${step.status}`), [
+    'prepare:running', 'prepare:completed',
+    'summary:running', 'summary:completed',
+    'bugs:running', 'bugs:completed',
+    'codeSmells:running', 'codeSmells:completed',
+    'save:running', 'save:completed'
+  ]);
   assert.deepEqual(meta.skippedFiles, []);
 
   const savedResults = await listAnalysisResults(repo);

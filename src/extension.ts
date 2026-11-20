@@ -46,6 +46,11 @@ type WebviewMessage =
   | { type: "clear" }
   | { type: "analyze"; profileId: string; modelId: string; guide: string }
   | { type: "cancelAnalysis" }
+  | {
+      type: "analysisStep";
+      step: string;
+      status: "running" | "completed" | "failed";
+    }
   | { type: "selectAnalysisModel"; modelId: string }
   | { type: "resetGuide"; profileId: string }
   | {
@@ -721,6 +726,9 @@ async function handleAnalyze(
         output?.appendLine(text);
         webview.postMessage({ type: "analysisProgress", text });
       },
+      onStep: (step, status) => {
+        webview.postMessage({ type: "analysisStep", step, status });
+      },
     });
     const modelUsage = context.globalState.get<Record<string, number>>(
       MODEL_USAGE_KEY,
@@ -854,6 +862,13 @@ function getHtml(webview: vscode.Webview): string {
     #analysisActions { display: flex; flex-wrap: wrap; gap: 8px; }
     #analysisActions button { margin: 12px 0 0; }
     #analysisStatus { margin-top: 12px; white-space: pre-wrap; font-size: 12px; }
+    #analysisProgressDialog { z-index: 30; }
+    #analysisProgressSteps { list-style: none; margin: 12px 0; padding: 0; }
+    #analysisProgressSteps li { display: flex; gap: 8px; align-items: baseline; padding: 5px 0; }
+    .analysis-step-indicator { width: 1.2em; color: var(--vscode-descriptionForeground); }
+    .analysis-step-indicator[data-status="completed"] { color: var(--vscode-testing-iconPassed); }
+    .analysis-step-indicator[data-status="failed"] { color: var(--vscode-errorForeground); }
+    #analysisProgressActions { display: flex; justify-content: flex-end; gap: 8px; }
     #analysisResults { margin-top: 8px; }
     .result-row { padding: 8px 0; border-bottom: 1px solid var(--vscode-panel-border); overflow-wrap: anywhere; }
     .result-row button { margin: 4px 0 0; }
@@ -874,20 +889,17 @@ function getHtml(webview: vscode.Webview): string {
   </div>
   <div id="reviewPanels">
     <section id="analysisPanel" role="tabpanel" aria-labelledby="analysisTab" tabindex="0" hidden>
-      <h3>Analyze changes</h3>
       <label for="analysisModelInput">AI model</label>
       <div id="analysisModelRow">
         <input id="analysisModelInput" aria-label="Selected AI model" placeholder="Select a model" readonly disabled>
         <button id="selectAnalysisModel" class="secondary" type="button" disabled>Select model</button>
       </div>
-      <p id="analysisModelCount" class="muted" aria-live="polite"></p>
       <label for="analysisProfile">Code profile</label>
       <select id="analysisProfile" aria-label="Code profile" disabled></select>
       <label for="analysisGuide">Analysis guide for this profile (editable)</label>
       <textarea id="analysisGuide" spellcheck="false" disabled></textarea>
       <div id="analysisActions">
         <button id="analyze" type="button" disabled>Analyze</button>
-        <button id="cancelAnalysis" class="secondary" type="button" hidden>Cancel analysis</button>
         <button id="resetGuide" class="secondary" type="button" disabled>Restore default guide</button>
       </div>
       <div id="analysisStatus" class="muted" aria-live="polite"></div>
@@ -904,6 +916,24 @@ function getHtml(webview: vscode.Webview): string {
   </div>
   <div id="noReview" class="muted">Checking .branchReview...</div>
   <div id="status" class="muted">Loading branches...</div>
+
+  <div id="analysisProgressDialog" class="modal" role="dialog" aria-modal="true" aria-labelledby="analysisProgressTitle" hidden>
+    <div class="modal-content">
+      <h3 id="analysisProgressTitle">Analyzing changes</h3>
+      <p id="analysisProgressMessage" class="muted" aria-live="polite">Preparing analysis...</p>
+      <ul id="analysisProgressSteps">
+        <li data-step="prepare"><span class="analysis-step-indicator" aria-hidden="true">○</span><span>Prepare changed files and review context</span></li>
+        <li data-step="summary"><span class="analysis-step-indicator" aria-hidden="true">○</span><span>Generate summary and analysis report</span></li>
+        <li data-step="bugs"><span class="analysis-step-indicator" aria-hidden="true">○</span><span>Find and sort bugs by severity</span></li>
+        <li data-step="codeSmells"><span class="analysis-step-indicator" aria-hidden="true">○</span><span>Identify code smells</span></li>
+        <li data-step="save"><span class="analysis-step-indicator" aria-hidden="true">○</span><span>Save all reports</span></li>
+      </ul>
+      <div id="analysisProgressActions">
+        <button id="cancelAnalysisDialog" class="secondary" type="button">Cancel analysis</button>
+        <button id="closeAnalysisDialog" type="button" hidden>Close</button>
+      </div>
+    </div>
+  </div>
 
   <div id="analysisModelDialog" class="modal" role="dialog" aria-modal="true" aria-labelledby="analysisModelDialogTitle" hidden>
     <div class="modal-content">
@@ -976,7 +1006,6 @@ function getHtml(webview: vscode.Webview): string {
     const status = document.getElementById('status');
     const modalStatus = document.getElementById('modalStatus');
     const analysisModelInput = document.getElementById('analysisModelInput');
-    const analysisModelCount = document.getElementById('analysisModelCount');
     const selectAnalysisModelButton = document.getElementById('selectAnalysisModel');
     const analysisModelDialog = document.getElementById('analysisModelDialog');
     const analysisModelSearch = document.getElementById('analysisModelSearch');
@@ -987,10 +1016,14 @@ function getHtml(webview: vscode.Webview): string {
     const analysisProfile = document.getElementById('analysisProfile');
     const analysisGuide = document.getElementById('analysisGuide');
     const analyzeButton = document.getElementById('analyze');
-    const cancelAnalysisButton = document.getElementById('cancelAnalysis');
     const resetGuideButton = document.getElementById('resetGuide');
     const analysisStatus = document.getElementById('analysisStatus');
     const analysisResults = document.getElementById('analysisResults');
+    const analysisProgressDialog = document.getElementById('analysisProgressDialog');
+    const analysisProgressMessage = document.getElementById('analysisProgressMessage');
+    const analysisProgressSteps = document.getElementById('analysisProgressSteps');
+    const cancelAnalysisDialogButton = document.getElementById('cancelAnalysisDialog');
+    const closeAnalysisDialogButton = document.getElementById('closeAnalysisDialog');
     let isBusy = false;
     let isLoading = true;
     let isRefreshing = false;
@@ -1112,7 +1145,6 @@ function getHtml(webview: vscode.Webview): string {
       analysisGuide.disabled = unavailable;
       resetGuideButton.disabled = unavailable;
       analyzeButton.disabled = unavailable || !hasValidReview || !hasModel || !hasGuide;
-      cancelAnalysisButton.hidden = !isAnalysisRunning;
     }
 
     function currentAnalysisProfile() {
@@ -1135,9 +1167,6 @@ function getHtml(webview: vscode.Webview): string {
       const selectedModel = previousModel || state.models.find(model => model.id === state.selectedModelId);
       analysisModelInput.dataset.modelId = selectedModel ? selectedModel.id : '';
       analysisModelInput.value = selectedModel ? selectedModel.name + ' (' + selectedModel.vendor + ')' : '';
-      analysisModelCount.textContent = state.models.length === 0
-        ? 'No AI models available. Sign in to GitHub Copilot or another model provider.'
-        : state.models.length + ' available model' + (state.models.length === 1 ? '' : 's');
       renderAnalysisModelChoices();
 
       analysisProfiles = state.profiles;
@@ -1247,6 +1276,38 @@ function getHtml(webview: vscode.Webview): string {
       closeAnalysisModelDialog();
       updateAnalysisState();
     });
+    function resetAnalysisProgress() {
+      for (const row of analysisProgressSteps.children) {
+        const indicator = row.firstChild;
+        indicator.textContent = '○';
+        indicator.removeAttribute('data-status');
+      }
+      analysisProgressMessage.className = 'muted';
+      analysisProgressMessage.textContent = 'Preparing analysis...';
+      cancelAnalysisDialogButton.hidden = false;
+      cancelAnalysisDialogButton.disabled = false;
+      closeAnalysisDialogButton.hidden = true;
+    }
+
+    function finishAnalysisProgress(message, isError) {
+      analysisProgressMessage.className = isError ? 'error' : 'muted';
+      analysisProgressMessage.textContent = message;
+      cancelAnalysisDialogButton.hidden = true;
+      closeAnalysisDialogButton.hidden = false;
+    }
+
+    function cancelAnalysis() {
+      cancelAnalysisDialogButton.disabled = true;
+      analysisProgressMessage.className = 'muted';
+      analysisProgressMessage.textContent = 'Cancelling analysis...';
+      vscode.postMessage({ type: 'cancelAnalysis' });
+    }
+
+    cancelAnalysisDialogButton.addEventListener('click', cancelAnalysis);
+    closeAnalysisDialogButton.addEventListener('click', () => {
+      analysisProgressDialog.hidden = true;
+    });
+
     analysisGuide.addEventListener('input', () => {
       const profile = currentAnalysisProfile();
       if (profile) {
@@ -1261,6 +1322,8 @@ function getHtml(webview: vscode.Webview): string {
       }
       analysisStatus.className = 'muted';
       analysisStatus.textContent = 'Starting analysis...';
+      resetAnalysisProgress();
+      analysisProgressDialog.hidden = false;
       vscode.postMessage({
         type: 'analyze',
         profileId: profile.id,
@@ -1268,8 +1331,9 @@ function getHtml(webview: vscode.Webview): string {
         guide: analysisGuide.value,
       });
     });
-    cancelAnalysisButton.addEventListener('click', () => {
-      vscode.postMessage({ type: 'cancelAnalysis' });
+    cancelAnalysisDialogButton.addEventListener('click', cancelAnalysis);
+    closeAnalysisDialogButton.addEventListener('click', () => {
+      analysisProgressDialog.hidden = true;
     });
     resetGuideButton.addEventListener('click', () => {
       const profile = currentAnalysisProfile();
@@ -1426,20 +1490,43 @@ function getHtml(webview: vscode.Webview): string {
           if (message.running) {
             analysisStatus.className = 'muted';
             analysisStatus.textContent = 'Starting analysis...';
+            analysisProgressDialog.hidden = false;
+          } else if (!closeAnalysisDialogButton.hidden && analysisProgressDialog.hidden === false) {
+            cancelAnalysisDialogButton.hidden = true;
           }
           updateDownloadState();
           break;
+        case 'analysisStep': {
+          const row = Array.from(analysisProgressSteps.children).find(item => item.getAttribute('data-step') === message.step);
+          if (row) {
+            const indicator = row.firstChild;
+            indicator.textContent = message.status === 'completed' ? '✓' : message.status === 'failed' ? '!' : '…';
+            indicator.setAttribute('data-status', message.status);
+          }
+          break;
+        }
         case 'analysisProgress':
           analysisStatus.className = 'muted';
           analysisStatus.textContent = message.text;
+          analysisProgressMessage.className = 'muted';
+          analysisProgressMessage.textContent = message.text;
+          if (message.text === 'Analysis cancelled.') {
+            isAnalysisRunning = false;
+            finishAnalysisProgress(message.text, false);
+            updateDownloadState();
+          }
           break;
         case 'analysisDone':
+          isAnalysisRunning = false;
           analysisStatus.className = 'muted';
           analysisStatus.textContent = message.text;
+          finishAnalysisProgress(message.text, false);
           break;
         case 'analysisError':
+          isAnalysisRunning = false;
           analysisStatus.className = 'error';
           analysisStatus.textContent = message.text;
+          finishAnalysisProgress(message.text, true);
           break;
       }
     });
