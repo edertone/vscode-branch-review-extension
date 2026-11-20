@@ -796,7 +796,7 @@ function getHtml(webview: vscode.Webview): string {
     #reviewTabs button { margin-top: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--vscode-foreground); }
     #reviewTabs button[aria-selected="true"] { border-bottom-color: var(--vscode-focusBorder); }
     #reviewPanels { max-width: 760px; }
-    #branchesPanel { margin-top: 20px; }
+    #branchesPanel, #resultsPanel { margin-top: 20px; }
     #reviewDetails { white-space: pre-wrap; }
     #changedFiles { max-height: 45vh; overflow: auto; padding-left: 20px; overflow-wrap: anywhere; }
     #status { margin-top: 16px; white-space: pre-wrap; font-size: 12px; }
@@ -836,6 +836,7 @@ function getHtml(webview: vscode.Webview): string {
   </div>
   <div id="reviewTabs" role="tablist" aria-label="Branch review" hidden>
     <button id="analysisTab" type="button" role="tab" aria-selected="true" aria-controls="analysisPanel" tabindex="0">Analysis</button>
+    <button id="resultsTab" type="button" role="tab" aria-selected="false" aria-controls="resultsPanel" tabindex="-1">Results</button>
     <button id="branchesTab" type="button" role="tab" aria-selected="false" aria-controls="branchesPanel" tabindex="-1">Downloaded branches</button>
   </div>
   <div id="reviewPanels">
@@ -857,8 +858,10 @@ function getHtml(webview: vscode.Webview): string {
         <button id="resetGuide" class="secondary" type="button" disabled>Restore default guide</button>
       </div>
       <div id="analysisStatus" class="muted" aria-live="polite"></div>
-      <h3 style="margin-top: 24px;">Results</h3>
-      <div id="analysisResults" class="muted"></div>
+    </section>
+    <section id="resultsPanel" role="tabpanel" aria-labelledby="resultsTab" tabindex="0" hidden>
+      <h3>Analysis results</h3>
+      <div id="analysisResults" class="muted" aria-live="polite"></div>
     </section>
     <section id="branchesPanel" role="tabpanel" aria-labelledby="branchesTab" tabindex="0" hidden>
       <h3>Downloaded review data</h3>
@@ -925,8 +928,10 @@ function getHtml(webview: vscode.Webview): string {
     const reviewSummary = document.getElementById('reviewSummary');
     const reviewTabs = document.getElementById('reviewTabs');
     const analysisTab = document.getElementById('analysisTab');
+    const resultsTab = document.getElementById('resultsTab');
     const branchesTab = document.getElementById('branchesTab');
     const analysisPanel = document.getElementById('analysisPanel');
+    const resultsPanel = document.getElementById('resultsPanel');
     const branchesPanel = document.getElementById('branchesPanel');
     const reviewDetails = document.getElementById('reviewDetails');
     const changedFiles = document.getElementById('changedFiles');
@@ -968,23 +973,33 @@ function getHtml(webview: vscode.Webview): string {
 
     function selectReviewTab(tab) {
       activeReviewTab = tab;
-      const showAnalysis = tab === 'analysis';
-      analysisTab.setAttribute('aria-selected', String(showAnalysis));
-      analysisTab.tabIndex = showAnalysis ? 0 : -1;
-      branchesTab.setAttribute('aria-selected', String(!showAnalysis));
-      branchesTab.tabIndex = showAnalysis ? -1 : 0;
-      analysisPanel.hidden = !showAnalysis;
-      branchesPanel.hidden = showAnalysis;
+      for (const [name, button, panel] of [
+        ['analysis', analysisTab, analysisPanel],
+        ['results', resultsTab, resultsPanel],
+        ['branches', branchesTab, branchesPanel]
+      ]) {
+        const selected = tab === name;
+        button.setAttribute('aria-selected', String(selected));
+        button.tabIndex = selected ? 0 : -1;
+        panel.hidden = !selected;
+      }
     }
 
-    for (const [tab, name] of [[analysisTab, 'analysis'], [branchesTab, 'branches']]) {
+    const reviewTabEntries = [
+      ['analysis', analysisTab],
+      ['results', resultsTab],
+      ['branches', branchesTab]
+    ];
+    for (const [name, tab] of reviewTabEntries) {
       tab.addEventListener('click', () => selectReviewTab(name));
       tab.addEventListener('keydown', event => {
         if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
           event.preventDefault();
-          const nextTab = name === 'analysis' ? branchesTab : analysisTab;
-          selectReviewTab(name === 'analysis' ? 'branches' : 'analysis');
-          nextTab.focus();
+          const currentIndex = reviewTabEntries.findIndex(entry => entry[0] === name);
+          const offset = event.key === 'ArrowRight' ? 1 : -1;
+          const next = reviewTabEntries[(currentIndex + offset + reviewTabEntries.length) % reviewTabEntries.length];
+          selectReviewTab(next[0]);
+          next[1].focus();
         }
       });
     }
@@ -1012,6 +1027,7 @@ function getHtml(webview: vscode.Webview): string {
         reviewTabs.hidden = true;
         reviewSummary.hidden = true;
         branchesPanel.hidden = true;
+        resultsPanel.hidden = true;
         noReview.hidden = false;
         noReview.textContent = review && review.reason
           ? 'No valid downloaded review: ' + review.reason
@@ -1124,7 +1140,8 @@ function getHtml(webview: vscode.Webview): string {
         const open = document.createElement('button');
         open.className = 'secondary';
         open.type = 'button';
-        open.textContent = 'Open report';
+        open.textContent = 'Open Markdown report';
+        open.setAttribute('aria-label', 'Open Markdown report for ' + result.profileLabel + ' analysis');
         open.addEventListener('click', () => {
           vscode.postMessage({ type: 'openResult', id: result.id });
         });

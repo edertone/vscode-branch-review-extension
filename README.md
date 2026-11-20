@@ -46,7 +46,7 @@ The **Analysis** tab sends the changes between the downloaded branches to an AI 
 2. Optionally edit the profile's **guide**, which tells the model what to look for. **Reset to default** restores the built-in guide. Edits are saved for the workspace when you click **Analyze**.
 3. Click **Analyze**. Only changed files matching the profile are sent, as diff patches, in a single request. If the changes are too large for the selected model's input window, the analysis stops before sending and asks you to choose a model with a larger window or narrow the branches. Cancel stops the analysis without saving a report.
 
-Each report is saved to `.branchReview/results/` as a Markdown file (`<id>.md`) with a JSON sidecar (`<id>.json`) holding metadata such as the model, profile, and skipped files. Saved results are listed in the Analysis tab and open in an editor. They survive re-downloading the branches and are removed only by **Clear .branchReview**.
+Each report is saved to `.branchReview/results/` as a Markdown file (`<id>.md`) with a JSON sidecar (`<id>.json`) holding metadata such as the model, profile, and skipped files. Saved results appear in a separate **Results** tab to the right of **Analysis**, newest first, with a button to open each Markdown report in an editor. They survive re-downloading the branches and are removed only by **Clear .branchReview**.
 
 Patches and branch names are untrusted input to the model. The model sees only the diffs, not full files, so it cannot verify context outside the changes. The first use of a model may ask for consent in VS Code.
 

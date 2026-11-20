@@ -314,7 +314,7 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
   for (const id of [
     'baseline', 'target', 'baselineBranches', 'targetBranches', 'download',
     'clear', 'refresh', 'chooseBranches', 'cancel', 'project', 'reviewSummary', 'status',
-    'modalStatus', 'modalTitle', 'analysisTab', 'branchesTab', 'analysisPanel', 'branchesPanel',
+    'modalStatus', 'modalTitle', 'analysisTab', 'resultsTab', 'branchesTab', 'analysisPanel', 'resultsPanel', 'branchesPanel',
     'reviewTabs', 'reviewDetails', 'changedFiles', 'noReview',
     'selectionModal', 'form', 'analysisModelInput', 'analysisModelCount', 'selectAnalysisModel', 'analysisModelDialog',
     'analysisModelSearch', 'analysisModelList', 'analysisModelDialogStatus', 'cancelAnalysisModel', 'confirmAnalysisModel',
@@ -444,6 +444,10 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
   assert.match(webview.html, /<select id="baselineBranches"/);
   assert.match(webview.html, /<select id="targetBranches"/);
   assert.match(webview.html, /<button id="analysisTab"[^>]*>Analysis<\/button>/);
+  assert.ok(webview.html.indexOf('id="analysisTab"') < webview.html.indexOf('id="resultsTab"'));
+  assert.ok(webview.html.indexOf('id="resultsTab"') < webview.html.indexOf('id="branchesTab"'));
+  assert.match(webview.html, /<section id="resultsPanel"[^>]*hidden>/);
+  assert.ok(!webview.html.includes('id="analysisResults"') || webview.html.indexOf('id="analysisResults"') > webview.html.indexOf('id="resultsPanel"'));
   assert.ok(webview.html.indexOf('id="project"') < webview.html.indexOf('id="reviewSummary"'));
   assert.ok(webview.html.indexOf('id="reviewSummary"') < webview.html.indexOf('id="reviewActions"'));
   assert.ok(webview.html.indexOf('id="reviewActions"') < webview.html.indexOf('id="reviewTabs"'));
