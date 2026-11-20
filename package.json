@@ -2,7 +2,7 @@
   "name": "branch-review",
   "displayName": "Branch Review",
   "description": "Download two git branches into .branchReview/ for side-by-side review.",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "publisher": "local-dev",
   "private": true,
   "license": "MIT",

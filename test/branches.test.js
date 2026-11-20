@@ -305,6 +305,7 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
       listeners: {},
       addEventListener(type, callback) { this.listeners[type] = callback; },
       setAttribute(name, value) { this[name] = value; },
+      getAttribute(name) { return this[name]; },
       replaceChildren() { this.children = []; },
       appendChild(child) { this.children.push(child); },
       focus() {}
@@ -315,7 +316,7 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
     'clear', 'refresh', 'chooseBranches', 'cancel', 'project', 'reviewSummary', 'status',
     'modalStatus', 'modalTitle', 'analysisTab', 'branchesTab', 'analysisPanel', 'branchesPanel',
     'reviewTabs', 'reviewDetails', 'changedFiles', 'noReview',
-    'selectionModal', 'form', 'analysisModel', 'analysisProfile', 'analysisGuide', 'analyze',
+    'selectionModal', 'form', 'analysisModel', 'analysisModelSearch', 'analysisModelCount', 'analysisProfile', 'analysisGuide', 'analyze',
     'cancelAnalysis', 'resetGuide', 'analysisStatus', 'analysisResults'
   ]) {
     elements.set(id, element(id));
@@ -424,7 +425,11 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
   } finally {
     Module._load = originalLoad;
   }
-  extension.activate({ subscriptions: [], workspaceState: { get: () => undefined, update: async () => {} } });
+  extension.activate({
+    subscriptions: [],
+    workspaceState: { get: () => undefined, update: async () => {} },
+    globalState: { get: () => ({}), update: async () => {} }
+  });
   t.after(() => viewDisposed?.());
   await command();
   await command();
@@ -468,6 +473,26 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
   await rebuildBranchReview(repo, 'main', 'origin/feature/not-fetched', () => {});
   watcherEvents.change();
   await externalSync;
+  webviewListener({ data: {
+    type: 'analysisState',
+    models: [
+      { id: 'frequent', name: 'Frequent Model', vendor: 'vendor', usage: 5 },
+      { id: 'slow', name: 'Slow Model', vendor: 'vendor', usage: 1 },
+      { id: 'unused', name: 'Unused Model', vendor: 'vendor', usage: 0 }
+    ],
+    selectedModelId: 'slow',
+    profiles: [],
+    results: []
+  } });
+  assert.deepEqual(elements.get('analysisModel').children.map(option => option.value), ['frequent', 'slow', 'unused']);
+  assert.equal(elements.get('analysisModel').value, 'slow');
+  elements.get('analysisModelSearch').value = 'frequent';
+  elements.get('analysisModelSearch').listeners.input();
+  assert.deepEqual(elements.get('analysisModel').children.map(option => option.value), ['frequent']);
+  elements.get('analysisModelSearch').value = '';
+  elements.get('analysisModelSearch').listeners.input();
+  assert.deepEqual(elements.get('analysisModel').children.map(option => option.value), ['frequent', 'slow', 'unused']);
+  assert.equal(elements.get('analysisModel').value, 'frequent');
   assert.equal(elements.get('selectionModal').hidden, true);
   assert.equal(elements.get('reviewSummary').hidden, false);
   assert.ok(elements.get('reviewSummary').textContent.includes('origin/feature/not-fetched'));

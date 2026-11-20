@@ -42,7 +42,7 @@ Click **Clear .branchReview** to delete the whole `.branchReview/` folder, inclu
 
 The **Analysis** tab sends the changes between the downloaded branches to an AI model chosen through VS Code's language model API (for example, GitHub Copilot). Requires a downloaded review.
 
-1. Choose a **model** and a **profile**: **Java** or **Angular**.
+1. Choose a **model** and a **profile**: **Java** or **Angular**. Search the available models by name, provider, or ID; models are ordered by how often you have run analyses with them, with alphabetical order for ties. VS Code's public API does not expose its own pinned/favourite model list.
 2. Optionally edit the profile's **guide**, which tells the model what to look for. **Reset to default** restores the built-in guide. Edits are saved for the workspace when you click **Analyze**.
 3. Click **Analyze**. Only changed files matching the profile are sent, as diff patches, in a single request. If the changes are too large for the selected model's input window, the analysis stops before sending and asks you to choose a model with a larger window or narrow the branches. Cancel stops the analysis without saving a report.
 

@@ -1,10 +1,6 @@
 import * as vscode from "vscode";
 import * as path from "path";
-import {
-  listAnalysisResults,
-  resultsRoot,
-  runAnalysis,
-} from "./analysis";
+import { listAnalysisResults, resultsRoot, runAnalysis } from "./analysis";
 import { ANALYSIS_PROFILES, findAnalysisProfile } from "./analysisProfiles";
 import {
   BRANCH_REVIEW_DIR,
@@ -19,6 +15,7 @@ import {
 const DEFAULT_BASELINE_BRANCH = "develop";
 const VIEW_ID = "branchReview.view";
 const MODEL_STATE_KEY = "branchReview.analysis.modelId";
+const MODEL_USAGE_KEY = "branchReview.analysis.modelUsage";
 const MAX_GUIDE_CHARS = 20_000;
 const RESULT_ID_PATTERN = /^[0-9A-Za-z-]+$/;
 
@@ -33,7 +30,9 @@ interface GitRepository {
 
 interface GitApi {
   repositories: GitRepository[];
-  onDidOpenRepository(listener: (repository: GitRepository) => void): vscode.Disposable;
+  onDidOpenRepository(
+    listener: (repository: GitRepository) => void,
+  ): vscode.Disposable;
 }
 
 interface GitExtensionExports {
@@ -254,17 +253,24 @@ function resolveView(
       if (disposed || !api) return;
       viewSubscriptions.push(
         api.onDidOpenRepository((repository) => {
-          const activeFile = vscode.window.activeTextEditor?.document.uri.fsPath;
-          if (currentRepo &&
-              (!activeFile ||
-                (activeFile !== repository.rootUri.fsPath &&
-                  !activeFile.startsWith(repository.rootUri.fsPath + path.sep)))) {
+          const activeFile =
+            vscode.window.activeTextEditor?.document.uri.fsPath;
+          if (
+            currentRepo &&
+            (!activeFile ||
+              (activeFile !== repository.rootUri.fsPath &&
+                !activeFile.startsWith(repository.rootUri.fsPath + path.sep)))
+          ) {
             return;
           }
           const selectedEditorRevision = ++editorRevision;
           void findRepository(activeFile).then(
             (selectedRepo) => {
-              if (!disposed && selectedEditorRevision === editorRevision && selectedRepo) {
+              if (
+                !disposed &&
+                selectedEditorRevision === editorRevision &&
+                selectedRepo
+              ) {
                 selectRepository(selectedRepo);
               }
             },
@@ -359,9 +365,18 @@ function resolveView(
           analysisController = controller;
           void webview.postMessage({ type: "analysisRunning", running: true });
           runExclusive(() =>
-            handleAnalyze(context, webview, message, repoRoot, controller.signal).finally(() => {
+            handleAnalyze(
+              context,
+              webview,
+              message,
+              repoRoot,
+              controller.signal,
+            ).finally(() => {
               analysisController = undefined;
-              void webview.postMessage({ type: "analysisRunning", running: false });
+              void webview.postMessage({
+                type: "analysisRunning",
+                running: false,
+              });
             }),
           );
           return;
@@ -561,19 +576,31 @@ async function buildAnalysisState(
   repoRoot: string,
 ): Promise<Record<string, unknown>> {
   const models = await listChatModels();
+  const modelUsage = context.globalState.get<Record<string, number>>(
+    MODEL_USAGE_KEY,
+    {},
+  );
   return {
     type: "analysisState",
-    models: models.map((model) => ({
-      id: model.id,
-      name: model.name,
-      vendor: model.vendor,
-    })),
+    models: models
+      .map((model) => ({
+        id: model.id,
+        name: model.name,
+        vendor: model.vendor,
+        usage: modelUsage[model.id] ?? 0,
+      }))
+      .sort(
+        (left, right) =>
+          right.usage - left.usage || left.name.localeCompare(right.name),
+      ),
     selectedModelId: context.workspaceState.get<string>(MODEL_STATE_KEY),
     profiles: ANALYSIS_PROFILES.map((profile) => ({
       id: profile.id,
       label: profile.label,
       defaultGuide: profile.guide,
-      guide: context.workspaceState.get<string>(guideStateKey(profile.id)) ?? profile.guide,
+      guide:
+        context.workspaceState.get<string>(guideStateKey(profile.id)) ??
+        profile.guide,
     })),
     results: await listAnalysisResults(repoRoot),
   };
@@ -627,13 +654,17 @@ async function handleAnalyze(
     return fail("The analysis guide cannot be empty.");
   }
   if (guide.length > MAX_GUIDE_CHARS) {
-    return fail(`The analysis guide cannot be longer than ${MAX_GUIDE_CHARS} characters.`);
+    return fail(
+      `The analysis guide cannot be longer than ${MAX_GUIDE_CHARS} characters.`,
+    );
   }
   const chatModel = (await listChatModels()).find(
     (model) => model.id === message.modelId,
   );
   if (!chatModel) {
-    return fail("The selected AI model is not available. Choose another model and try again.");
+    return fail(
+      "The selected AI model is not available. Choose another model and try again.",
+    );
   }
 
   const guideCustomized = guide.trim() !== profile.guide.trim();
@@ -643,7 +674,9 @@ async function handleAnalyze(
     guideCustomized ? guide : undefined,
   );
 
-  output?.appendLine(`Analysis started: ${profile.label} profile with ${chatModel.name}`);
+  output?.appendLine(
+    `Analysis started: ${profile.label} profile with ${chatModel.name}`,
+  );
   try {
     const meta = await runAnalysis({
       repoRoot,
@@ -656,11 +689,20 @@ async function handleAnalyze(
         maxInputTokens: chatModel.maxInputTokens,
       },
       signal,
-      sendPrompt: (prompt, promptSignal) => sendToModel(chatModel, prompt, promptSignal),
+      sendPrompt: (prompt, promptSignal) =>
+        sendToModel(chatModel, prompt, promptSignal),
       onProgress: (text) => {
         output?.appendLine(text);
         webview.postMessage({ type: "analysisProgress", text });
       },
+    });
+    const modelUsage = context.globalState.get<Record<string, number>>(
+      MODEL_USAGE_KEY,
+      {},
+    );
+    await context.globalState.update(MODEL_USAGE_KEY, {
+      ...modelUsage,
+      [chatModel.id]: (modelUsage[chatModel.id] ?? 0) + 1,
     });
     const text = `Analysis saved to ${path.join(BRANCH_REVIEW_DIR, RESULTS_DIR, meta.reportFile)}`;
     output?.appendLine(text);
@@ -668,7 +710,10 @@ async function handleAnalyze(
   } catch (err) {
     if (signal.aborted) {
       output?.appendLine("Analysis cancelled.");
-      webview.postMessage({ type: "analysisProgress", text: "Analysis cancelled." });
+      webview.postMessage({
+        type: "analysisProgress",
+        text: "Analysis cancelled.",
+      });
       return;
     }
     fail((err as Error).message);
@@ -677,12 +722,16 @@ async function handleAnalyze(
 
 async function openAnalysisReport(repoRoot: string, id: string): Promise<void> {
   if (!RESULT_ID_PATTERN.test(id)) {
-    vscode.window.showErrorMessage("Branch Review: invalid analysis result id.");
+    vscode.window.showErrorMessage(
+      "Branch Review: invalid analysis result id.",
+    );
     return;
   }
   const reportPath = path.join(resultsRoot(repoRoot), `${id}.md`);
   try {
-    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(reportPath));
+    const document = await vscode.workspace.openTextDocument(
+      vscode.Uri.file(reportPath),
+    );
     await vscode.window.showTextDocument(document, { preview: false });
   } catch (err) {
     vscode.window.showErrorMessage(
@@ -744,8 +793,10 @@ function getHtml(webview: vscode.Webview): string {
     .modal-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; }
     .modal-actions .secondary { margin-left: 0; }
     .modal-actions-end { display: flex; align-items: center; gap: 8px; }
-    #analysisPanel select, #analysisPanel textarea { margin-top: 4px; }
-    #analysisGuide { box-sizing: border-box; width: 100%; min-height: 260px; resize: vertical; padding: 6px 8px; font-family: var(--vscode-editor-font-family); font-size: 12px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); outline: none; }
+    #analysisPanel select, #analysisPanel textarea, #analysisPanel input { margin-top: 4px; }
+    #analysisModelSearch { box-sizing: border-box; width: 100%; padding: 6px 8px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); }
+    #analysisModel { box-sizing: border-box; width: 100%; }
+    #analysisGuide { box-sizing: border-box; width: 100%; min-height: 120px; resize: vertical; padding: 6px 8px; font-family: var(--vscode-editor-font-family); font-size: 12px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); outline: none; }
     #analysisGuide:focus { border-color: var(--vscode-focusBorder); }
     #analysisActions { display: flex; flex-wrap: wrap; gap: 8px; }
     #analysisActions button { margin: 12px 0 0; }
@@ -770,8 +821,10 @@ function getHtml(webview: vscode.Webview): string {
   <div id="reviewPanels">
     <section id="analysisPanel" role="tabpanel" aria-labelledby="analysisTab" tabindex="0" hidden>
       <h3>Analyze changes</h3>
-      <label for="analysisModel">AI model</label>
-      <select id="analysisModel" aria-label="AI model" disabled></select>
+      <label for="analysisModelSearch">Search available AI models (most used first)</label>
+      <input id="analysisModelSearch" type="search" aria-label="Search available AI models" placeholder="Type to filter models" disabled>
+      <select id="analysisModel" aria-label="AI model" size="3" disabled></select>
+      <p id="analysisModelCount" class="muted" aria-live="polite"></p>
       <label for="analysisProfile">Code profile</label>
       <select id="analysisProfile" aria-label="Code profile" disabled></select>
       <label for="analysisGuide">Analysis guide for this profile (editable)</label>
@@ -847,6 +900,8 @@ function getHtml(webview: vscode.Webview): string {
     const status = document.getElementById('status');
     const modalStatus = document.getElementById('modalStatus');
     const analysisModel = document.getElementById('analysisModel');
+    const analysisModelSearch = document.getElementById('analysisModelSearch');
+    const analysisModelCount = document.getElementById('analysisModelCount');
     const analysisProfile = document.getElementById('analysisProfile');
     const analysisGuide = document.getElementById('analysisGuide');
     const analyzeButton = document.getElementById('analyze');
@@ -958,6 +1013,7 @@ function getHtml(webview: vscode.Webview): string {
       const hasModel = analysisModels.length > 0 && analysisModel.value !== '';
       const hasGuide = analysisGuide.value.trim() !== '';
       analysisModel.disabled = unavailable || analysisModels.length === 0;
+      analysisModelSearch.disabled = unavailable || analysisModels.length === 0;
       analysisProfile.disabled = unavailable;
       analysisGuide.disabled = unavailable;
       resetGuideButton.disabled = unavailable;
@@ -979,24 +1035,19 @@ function getHtml(webview: vscode.Webview): string {
     }
 
     function renderAnalysisState(state) {
-      analysisModels = state.models;
       const previousModel = analysisModel.value;
-      analysisModel.replaceChildren();
-      if (state.models.length === 0) {
-        const placeholder = document.createElement('option');
-        placeholder.value = '';
-        placeholder.textContent = 'No AI models available. Sign in to GitHub Copilot or another model provider.';
-        analysisModel.appendChild(placeholder);
-      }
-      for (const model of state.models) {
-        const option = document.createElement('option');
-        option.value = model.id;
-        option.textContent = model.name + ' (' + model.vendor + ')';
-        analysisModel.appendChild(option);
-      }
+      analysisModels = state.models;
       const preferredModel = [previousModel, state.selectedModelId]
-        .find(id => id && state.models.some(model => model.id === id));
-      analysisModel.value = preferredModel || (state.models[0] ? state.models[0].id : '');
+        .find(id => id && state.models.some(model => model.id === id)) ||
+        (state.models[0] ? state.models[0].id : '');
+      if (!analysisModelSearch.value) {
+        renderFilteredAnalysisModels(preferredModel);
+      } else {
+        renderFilteredAnalysisModels(analysisModel.value);
+      }
+      analysisModelCount.textContent = state.models.length === 0
+        ? 'No AI models available. Sign in to GitHub Copilot or another model provider.'
+        : state.models.length + ' available model' + (state.models.length === 1 ? '' : 's') + ' · sorted by analyses run';
 
       analysisProfiles = state.profiles;
       const previousProfile = analysisProfile.value;
@@ -1041,8 +1092,28 @@ function getHtml(webview: vscode.Webview): string {
       }
     }
 
+    function renderFilteredAnalysisModels(preferredId) {
+      const query = analysisModelSearch.value.trim().toLocaleLowerCase();
+      const matchingModels = analysisModels.filter(model =>
+        (model.name + ' ' + model.vendor + ' ' + model.id).toLocaleLowerCase().includes(query));
+      analysisModel.replaceChildren();
+      for (const model of matchingModels) {
+        const option = document.createElement('option');
+        option.value = model.id;
+        option.textContent = model.name + ' (' + model.vendor + ')';
+        analysisModel.appendChild(option);
+      }
+      const selectedModel = matchingModels.find(model => model.id === preferredId) || matchingModels[0];
+      analysisModel.value = selectedModel ? selectedModel.id : '';
+      analysisModelCount.textContent = matchingModels.length === analysisModels.length
+        ? analysisModels.length + ' available model' + (analysisModels.length === 1 ? '' : 's') + ' · sorted by analyses run'
+        : matchingModels.length + ' of ' + analysisModels.length + ' models · sorted by analyses run';
+      updateAnalysisState();
+    }
+
     analysisProfile.addEventListener('change', showProfileGuide);
     analysisModel.addEventListener('change', updateAnalysisState);
+    analysisModelSearch.addEventListener('input', () => renderFilteredAnalysisModels(analysisModel.value));
     analysisGuide.addEventListener('input', () => {
       const profile = currentAnalysisProfile();
       if (profile) {
