@@ -302,6 +302,7 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
       id, value: '', disabled: false, hidden: false, textContent: '', className: '', children: [],
       listeners: {},
       addEventListener(type, callback) { this.listeners[type] = callback; },
+      setAttribute(name, value) { this[name] = value; },
       replaceChildren() { this.children = []; },
       appendChild(child) { this.children.push(child); },
       focus() {}
@@ -309,14 +310,15 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
   }
   for (const id of [
     'baseline', 'target', 'baselineBranches', 'targetBranches', 'download',
-    'clear', 'refresh', 'chooseBranches', 'cancel', 'project', 'status',
-    'modalStatus', 'modalTitle', 'savedReview', 'reviewDetails', 'changedFiles', 'noReview',
+    'clear', 'refresh', 'chooseBranches', 'cancel', 'project', 'reviewSummary', 'status',
+    'modalStatus', 'modalTitle', 'analysisTab', 'branchesTab', 'analysisPanel', 'branchesPanel',
+    'reviewTabs', 'reviewDetails', 'changedFiles', 'noReview',
     'selectionModal', 'form'
   ]) {
     elements.set(id, element(id));
   }
   elements.get('selectionModal').hidden = true;
-  elements.get('savedReview').hidden = true;
+  elements.get('reviewSummary').hidden = true;
   elements.get('noReview').hidden = false;
   elements.get('cancel').hidden = true;
   const outbound = [];
@@ -423,6 +425,10 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
   repositories.length = 0;
   assert.match(webview.html, /<select id="baselineBranches"/);
   assert.match(webview.html, /<select id="targetBranches"/);
+  assert.match(webview.html, /<button id="analysisTab"[^>]*>Analysis<\/button>/);
+  assert.ok(webview.html.indexOf('id="project"') < webview.html.indexOf('id="reviewSummary"'));
+  assert.ok(webview.html.indexOf('id="reviewSummary"') < webview.html.indexOf('id="reviewActions"'));
+  assert.ok(webview.html.indexOf('id="reviewActions"') < webview.html.indexOf('id="reviewTabs"'));
   const script = webview.html.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)[1];
   vm.runInNewContext(script, {
     acquireVsCodeApi: () => ({ postMessage(message) {
@@ -456,8 +462,9 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
   watcherEvents.change();
   await externalSync;
   assert.equal(elements.get('selectionModal').hidden, true);
-  assert.equal(elements.get('savedReview').hidden, false);
-  assert.ok(elements.get('reviewDetails').textContent.includes('origin/feature/not-fetched'));
+  assert.equal(elements.get('reviewSummary').hidden, false);
+  assert.ok(elements.get('reviewSummary').textContent.includes('origin/feature/not-fetched'));
+  assert.ok(elements.get('reviewDetails').textContent.includes('Changed files:'));
   elements.get('chooseBranches').listeners.click();
   assert.equal(elements.get('selectionModal').hidden, false);
   assert.equal(elements.get('cancel').hidden, false);

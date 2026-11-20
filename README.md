@@ -6,7 +6,7 @@ VS Code extension that downloads a baseline and target Git branch into `.branchR
 
 1. Run **Branch Review: Open View** from the Command Palette to open Branch Review in VS Code's Secondary Side Bar, alongside Chat.
 2. The panel shows the saved review when `.branchReview/` contains a valid download. Otherwise, or when you choose **Choose branches / Download**, a modal opens for selecting the **Baseline branch (old)** and **Target branch (new)**. Baseline defaults to `develop` and target to the current branch when available.
-3. Click **Download** in the modal. The view then displays the saved branch revisions and changed-file list.
+3. Click **Download** in the modal. The view then shows a **Analysis** tab first (currently empty) and a **Downloaded branches** tab with the saved branch revisions and changed-file list.
 
 VS Code 1.106 or later is required. If you have moved the view, VS Code will reopen it in its saved location; use **View: Reset View Locations** to restore its default position.
 

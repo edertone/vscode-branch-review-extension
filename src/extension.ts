@@ -506,7 +506,14 @@ function getHtml(webview: vscode.Webview): string {
     .secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); margin-left: 8px; }
     .secondary:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); }
     #project { overflow-wrap: anywhere; }
-    #savedReview { margin-top: 20px; max-width: 760px; }
+    #reviewSummary { margin-top: 8px; white-space: pre-wrap; }
+    #reviewActions { display: flex; flex-wrap: wrap; gap: 8px; }
+    #reviewActions button { margin: 12px 0 0; }
+    #reviewTabs { display: flex; gap: 4px; margin-top: 20px; border-bottom: 1px solid var(--vscode-panel-border); }
+    #reviewTabs button { margin-top: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--vscode-foreground); }
+    #reviewTabs button[aria-selected="true"] { border-bottom-color: var(--vscode-focusBorder); }
+    #reviewPanels { max-width: 760px; }
+    #branchesPanel { margin-top: 20px; }
     #reviewDetails { white-space: pre-wrap; }
     #changedFiles { max-height: 45vh; overflow: auto; padding-left: 20px; overflow-wrap: anywhere; }
     #status { margin-top: 16px; white-space: pre-wrap; font-size: 12px; }
@@ -523,14 +530,24 @@ function getHtml(webview: vscode.Webview): string {
 <body>
   <h2>Branch Review</h2>
   <div id="project" class="muted">Loading project...</div>
-  <section id="savedReview" hidden>
-    <h3>Downloaded review data</h3>
-    <div id="reviewDetails"></div>
-    <ul id="changedFiles"></ul>
-  </section>
+  <div id="reviewSummary" class="muted" hidden></div>
+  <div id="reviewActions">
+    <button id="chooseBranches" type="button" disabled>Choose branches / Download</button>
+    <button id="clear" class="secondary" type="button" disabled>Clear .branchReview</button>
+  </div>
+  <div id="reviewTabs" role="tablist" aria-label="Branch review" hidden>
+    <button id="analysisTab" type="button" role="tab" aria-selected="true" aria-controls="analysisPanel" tabindex="0">Analysis</button>
+    <button id="branchesTab" type="button" role="tab" aria-selected="false" aria-controls="branchesPanel" tabindex="-1">Downloaded branches</button>
+  </div>
+  <div id="reviewPanels">
+    <section id="analysisPanel" role="tabpanel" aria-labelledby="analysisTab" tabindex="0" hidden></section>
+    <section id="branchesPanel" role="tabpanel" aria-labelledby="branchesTab" tabindex="0" hidden>
+      <h3>Downloaded review data</h3>
+      <div id="reviewDetails"></div>
+      <ul id="changedFiles"></ul>
+    </section>
+  </div>
   <div id="noReview" class="muted">Checking .branchReview...</div>
-  <button id="chooseBranches" type="button" disabled>Choose branches / Download</button>
-  <button id="clear" class="secondary" type="button" disabled>Clear .branchReview</button>
   <div id="status" class="muted">Loading branches...</div>
 
   <div id="selectionModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle" hidden>
@@ -570,7 +587,12 @@ function getHtml(webview: vscode.Webview): string {
     const chooseButton = document.getElementById('chooseBranches');
     const cancelButton = document.getElementById('cancel');
     const project = document.getElementById('project');
-    const savedReview = document.getElementById('savedReview');
+    const reviewSummary = document.getElementById('reviewSummary');
+    const reviewTabs = document.getElementById('reviewTabs');
+    const analysisTab = document.getElementById('analysisTab');
+    const branchesTab = document.getElementById('branchesTab');
+    const analysisPanel = document.getElementById('analysisPanel');
+    const branchesPanel = document.getElementById('branchesPanel');
     const reviewDetails = document.getElementById('reviewDetails');
     const changedFiles = document.getElementById('changedFiles');
     const noReview = document.getElementById('noReview');
@@ -586,6 +608,30 @@ function getHtml(webview: vscode.Webview): string {
     let baselineEdited = false;
     let targetEdited = false;
     let hasValidReview = false;
+    let activeReviewTab = 'analysis';
+
+    function selectReviewTab(tab) {
+      activeReviewTab = tab;
+      const showAnalysis = tab === 'analysis';
+      analysisTab.setAttribute('aria-selected', String(showAnalysis));
+      analysisTab.tabIndex = showAnalysis ? 0 : -1;
+      branchesTab.setAttribute('aria-selected', String(!showAnalysis));
+      branchesTab.tabIndex = showAnalysis ? -1 : 0;
+      analysisPanel.hidden = !showAnalysis;
+      branchesPanel.hidden = showAnalysis;
+    }
+
+    for (const [tab, name] of [[analysisTab, 'analysis'], [branchesTab, 'branches']]) {
+      tab.addEventListener('click', () => selectReviewTab(name));
+      tab.addEventListener('keydown', event => {
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+          event.preventDefault();
+          const nextTab = name === 'analysis' ? branchesTab : analysisTab;
+          selectReviewTab(name === 'analysis' ? 'branches' : 'analysis');
+          nextTab.focus();
+        }
+      });
+    }
 
     function setStatus(text, isError) {
       status.className = isError ? 'error' : 'muted';
@@ -605,7 +651,11 @@ function getHtml(webview: vscode.Webview): string {
     function renderReview(review) {
       hasValidReview = review && review.valid === true;
       if (!hasValidReview) {
-        savedReview.hidden = true;
+        activeReviewTab = 'analysis';
+        selectReviewTab(activeReviewTab);
+        reviewTabs.hidden = true;
+        reviewSummary.hidden = true;
+        branchesPanel.hidden = true;
         noReview.hidden = false;
         noReview.textContent = review && review.reason
           ? 'No valid downloaded review: ' + review.reason
@@ -613,12 +663,15 @@ function getHtml(webview: vscode.Webview): string {
         showPicker(true);
         return;
       }
-      savedReview.hidden = false;
+      reviewTabs.hidden = false;
+      selectReviewTab(activeReviewTab);
+      reviewSummary.hidden = false;
       noReview.hidden = true;
-      reviewDetails.textContent =
+      reviewSummary.textContent =
         'Baseline: ' + review.baseline.branch + ' (' + review.baseline.commit.slice(0, 8) + ')\\n' +
         'Target: ' + review.target.branch + ' (' + review.target.commit.slice(0, 8) + ')\\n' +
-        'Generated: ' + review.generatedAt + '\\n' +
+        'Generated: ' + review.generatedAt;
+      reviewDetails.textContent =
         'Changed files: ' + review.summary.changedFiles +
         (review.summary.shortStat ? ' — ' + review.summary.shortStat : '');
       changedFiles.replaceChildren();
