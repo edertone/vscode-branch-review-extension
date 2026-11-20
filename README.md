@@ -1,39 +1,50 @@
 # Branch Review
 
-VS Code extension that downloads two git branches into `.branchReview/` at the root of the repository, so they can be compared side by side.
+VS Code extension that downloads a baseline and target Git branch into `.branchReview/` at the root of the repository, and creates a compact review bundle for AI-assisted analysis.
 
 ## Usage
 
 1. Run **Branch Review: Open Panel** from the Command Palette.
-2. The first input defaults to the current branch of the active repository; the second defaults to `develop`. Change either one as needed.
+2. Check the project folder shown in the panel, then select or type **Baseline branch (old)** and **Target branch (new)**. Baseline defaults to `develop` and target to the current branch when available.
 3. Click **Download**.
 
-Each branch is written to its own folder:
+Use **Browse branches** under either input to see the full list of local branches and branches queried directly from every configured remote, including branches not yet fetched. You can also type a branch name. Remote branches are shown as `remote/branch` (for example, `origin/develop`); a manually entered unqualified name uses `origin` when available. If a remote cannot be queried, a warning is shown and its cached remote-tracking branches are not listed.
+
+Click **Refresh branches** to query origin and the other configured remotes again without changing the selected or typed branch names. The panel follows the active editor's Git repository; if no editor belongs to a repository when opened, it uses the first open repository. The displayed project name is the repository's folder name.
+
+The selected branches are written to role-based folders, regardless of their branch names:
 
 ```
 .branchReview/
-  <first-branch>/
-  <second-branch>/
+  baseline/
+  target/
+  ai-review/
 ```
 
-Characters other than letters, digits, `.`, `_` and `-` in a branch name are replaced with `_` in the folder name (e.g. `feature/x` → `feature_x`).
+`ai-review/` contains:
 
-Clicking **Download** again replaces the folders with the latest data.
+- `manifest.json`: exact branch names, commit IDs, commit times, generation details, and size limits.
+- `overview.md`: comparison direction and review guidance.
+- `changed-files.json`: changed paths and links to per-file diffs.
+- `files/`: unified diffs with 40 lines of context.
+- `commits.json`: commits reachable from target but not baseline.
+- `context/`: selected small project README and manifest files from target.
+
+The comparison is a direct tree diff from baseline to target; it does not infer age from branch names or commit dates and is not a merge-base comparison. Large diffs and commit lists are capped, with truncation recorded in the bundle. Clicking **Download** again replaces the baseline, target, and AI review data with the latest data. The AI bundle is generated locally; the extension does not send repository contents to an AI service.
 
 Click **Clear .branchReview** to delete the whole `.branchReview/` folder. A confirmation dialog is shown first.
 
 ## How it works
 
-- Fetches each branch from `origin` (`+refs/heads/<branch>`). If the fetch fails, or there is no `origin`, the local branch is used.
+- Fetches each branch from its specified remote, or from `origin` for unqualified names. If fetching fails, a locally known remote-tracking branch is used; for unqualified names, a local branch is also used as a fallback.
 - Exports the committed tree of the branch. Your index, `HEAD`, and working tree are not modified; uncommitted changes are not included.
+- Generates `ai-review/` only after both branch trees have been exported successfully.
 - Logs are written to the **Branch Review** output channel.
 
 ## Development
 
 ```bash
-npm install
-npm run compile
-npm run package   # produces branch-review-<version>.vsix
+npm run build   # installs dependencies, compiles, and produces branch-review-<version>.vsix
 ```
 
 Install the `.vsix` with **Extensions: Install from VSIX...** in VS Code.
