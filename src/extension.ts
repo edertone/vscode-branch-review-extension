@@ -48,7 +48,7 @@ type WebviewMessage =
   | { type: "cancelAnalysis" }
   | { type: "selectAnalysisModel"; modelId: string }
   | { type: "resetGuide"; profileId: string }
-  | { type: "openResult"; id: string };
+  | { type: "openResult"; id: string; reportKind?: "summary" | "bugs" | "codeSmells" };
 
 let output: vscode.OutputChannel | undefined;
 
@@ -347,7 +347,7 @@ function resolveView(
           .then(postAnalysisState);
       } else if (message.type === "openResult") {
         if (currentRepo) {
-          void openAnalysisReport(currentRepo.rootUri.fsPath, message.id);
+          void openAnalysisReport(currentRepo.rootUri.fsPath, message.id, message.reportKind);
         }
       } else if (message.type === "analyze" && busy) {
         void webview.postMessage({
@@ -719,7 +719,7 @@ async function handleAnalyze(
       ...modelUsage,
       [chatModel.id]: (modelUsage[chatModel.id] ?? 0) + 1,
     });
-    const text = `Analysis saved to ${path.join(BRANCH_REVIEW_DIR, RESULTS_DIR, meta.reportFile)}`;
+    const text = `Analysis reports saved to ${path.join(BRANCH_REVIEW_DIR, RESULTS_DIR, path.dirname(meta.reportFile))}`;
     output?.appendLine(text);
     webview.postMessage({ type: "analysisDone", text });
   } catch (err) {
@@ -735,7 +735,11 @@ async function handleAnalyze(
   }
 }
 
-async function openAnalysisReport(repoRoot: string, id: string): Promise<void> {
+async function openAnalysisReport(
+  repoRoot: string,
+  id: string,
+  reportKind: "summary" | "bugs" | "codeSmells" = "summary",
+): Promise<void> {
   if (!RESULT_ID_PATTERN.test(id)) {
     vscode.window.showErrorMessage(
       "Branch Review: invalid analysis result id.",
@@ -748,7 +752,12 @@ async function openAnalysisReport(repoRoot: string, id: string): Promise<void> {
       vscode.window.showErrorMessage("Branch Review: analysis report not found.");
       return;
     }
-    const reportPath = path.join(resultsRoot(repoRoot), result.reportFile);
+    const reportFile = result.reportFiles?.[reportKind] ?? (reportKind === "summary" ? result.reportFile : undefined);
+    if (!reportFile) {
+      vscode.window.showErrorMessage("Branch Review: requested report is not available.");
+      return;
+    }
+    const reportPath = path.join(resultsRoot(repoRoot), reportFile);
     const document = await vscode.workspace.openTextDocument(
       vscode.Uri.file(reportPath),
     );
@@ -1140,18 +1149,23 @@ function getHtml(webview: vscode.Webview): string {
           : '';
         info.textContent = result.profileLabel + ' · ' + result.target.branch + ' vs ' + result.baseline.branch +
           ' · ' + result.model.name + ' · ' + new Date(result.createdAt).toLocaleString() +
-          ' · ' + result.analyzedFiles + ' of ' + result.relevantFiles + ' files' + skipped +
+          ' · ' + result.analyzedFiles + ' of ' + result.relevantFiles + ' files' +
+          (result.modelCalls ? ' · ' + result.modelCalls + ' model calls' : '') + skipped +
           (result.guideCustomized ? ' · edited guide' : '');
-        const open = document.createElement('button');
-        open.className = 'secondary';
-        open.type = 'button';
-        open.textContent = 'Open Markdown report';
-        open.setAttribute('aria-label', 'Open Markdown report for ' + result.profileLabel + ' analysis');
-        open.addEventListener('click', () => {
-          vscode.postMessage({ type: 'openResult', id: result.id });
-        });
         row.appendChild(info);
-        row.appendChild(open);
+        const reports = result.reportFiles || { summary: result.reportFile };
+        for (const [kind, label] of [['summary', 'Summary'], ['bugs', 'Bugs by severity'], ['codeSmells', 'Code smells']]) {
+          if (!reports[kind]) continue;
+          const open = document.createElement('button');
+          open.className = 'secondary';
+          open.type = 'button';
+          open.textContent = 'Open ' + label;
+          open.setAttribute('aria-label', 'Open ' + label + ' report for ' + result.profileLabel + ' analysis');
+          open.addEventListener('click', () => {
+            vscode.postMessage({ type: 'openResult', id: result.id, reportKind: kind });
+          });
+          row.appendChild(open);
+        }
         analysisResults.appendChild(row);
       }
     }

@@ -637,22 +637,37 @@ test('analysis sends only profile-relevant changes and stores the report', async
     guideCustomized: true,
     model: { id: 'fake', name: 'Fake model' },
     signal: new AbortController().signal,
-    sendPrompt: async prompt => { prompts.push(prompt); return '## Summary\nLooks fine.'; },
+    sendPrompt: async prompt => { prompts.push(prompt); return `Report ${prompts.length}`; },
     onProgress() {}
   });
-  assert.equal(prompts.length, 1);
-  assert.ok(prompts[0].includes('src/user.service.ts'));
+  assert.equal(prompts.length, 3);
+  for (const prompt of prompts) {
+    assert.ok(prompt.includes('src/user.service.ts'));
+    assert.ok(!prompt.includes('file.txt'));
+  }
   assert.ok(prompts[0].includes('Custom guide'));
-  assert.ok(!prompts[0].includes('file.txt'));
+  assert.ok(prompts[1].includes('Custom guide'));
+  assert.ok(!prompts[2].includes('Custom guide'));
+  assert.ok(prompts[0].includes('summarizing'));
+  assert.ok(prompts[1].includes('severity'));
+  assert.ok(prompts[2].includes('code smells'));
   assert.equal(meta.relevantFiles, 1);
+  assert.equal(meta.modelCalls, 3);
+  assert.equal(meta.batches, 1);
   assert.deepEqual(meta.skippedFiles, []);
 
-  const [saved] = await listAnalysisResults(repo);
+  const savedResults = await listAnalysisResults(repo);
+  const saved = savedResults.find(result => result.id === meta.id);
+  assert.ok(saved);
   assert.equal(saved.id, meta.id);
   assert.equal(path.dirname(meta.reportFile), meta.createdAt.replace(/[:.]/g, '-'));
   const resultDirectory = path.join(resultsRoot(repo), path.dirname(meta.reportFile));
-  assert.ok((await fs.readdir(resultDirectory)).includes(`${meta.id}.json`));
-  assert.match(await fs.readFile(path.join(resultsRoot(repo), meta.reportFile), 'utf8'), /Looks fine\./);
+  const savedFiles = await fs.readdir(resultDirectory);
+  assert.ok(savedFiles.includes(`${meta.id}.json`));
+  assert.equal(savedFiles.filter(name => name.endsWith('.md')).length, 3);
+  for (const [index, kind] of ['summary', 'bugs', 'codeSmells'].entries()) {
+    assert.match(await fs.readFile(path.join(resultsRoot(repo), meta.reportFiles[kind]), 'utf8'), new RegExp(`Report ${index + 1}`));
+  }
 
   await assert.rejects(runAnalysis({
     repoRoot: repo,
@@ -722,7 +737,7 @@ test('re-downloading the review keeps saved analysis results', async t => {
   assert.equal(await fs.readFile(path.join(directory, 'saved.md'), 'utf8'), 'report');
 });
 
-test('analysis sends all relevant files in one request and saves one report', async t => {
+test('analysis sends all relevant files in three focused calls and saves three reports', async t => {
   const { repo, seed } = await fixture(t);
   await fs.mkdir(path.join(seed, 'src'), { recursive: true });
   for (const name of ['a', 'b', 'c', 'd']) {
@@ -734,6 +749,7 @@ test('analysis sends all relevant files in one request and saves one report', as
   await rebuildBranchReview(repo, 'main', 'origin/feature/not-fetched', () => {});
 
   const prompts = [];
+  const progress = [];
   const meta = await runAnalysis({
     repoRoot: repo,
     profile: findAnalysisProfile('angular'),
@@ -742,14 +758,19 @@ test('analysis sends all relevant files in one request and saves one report', as
     model: { id: 'fake', name: 'Fake model' },
     signal: new AbortController().signal,
     sendPrompt: async prompt => { prompts.push(prompt); return 'single response'; },
-    onProgress() {}
+    onProgress: text => progress.push(text)
   });
-  assert.equal(prompts.length, 1);
-  for (const name of ['a', 'b', 'c', 'd']) {
-    assert.ok(prompts[0].includes(`src/${name}.component.ts`));
+  assert.equal(prompts.length, 3);
+  for (const prompt of prompts) {
+    for (const name of ['a', 'b', 'c', 'd']) {
+      assert.ok(prompt.includes(`src/${name}.component.ts`));
+    }
   }
   assert.equal(meta.batches, 1);
+  assert.equal(meta.modelCalls, 3);
   assert.equal(meta.analyzedFiles, 4);
-  const report = await fs.readFile(path.join(resultsRoot(repo), meta.reportFile), 'utf8');
-  assert.match(report, /single response/);
+  assert.equal(progress.filter(message => message.includes('report (')).length, 3);
+  for (const reportFile of Object.values(meta.reportFiles)) {
+    assert.match(await fs.readFile(path.join(resultsRoot(repo), reportFile), 'utf8'), /single response/);
+  }
 });
