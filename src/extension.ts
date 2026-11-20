@@ -655,6 +655,23 @@ async function buildAnalysisState(
   };
 }
 
+async function countModelTokens(
+  model: vscode.LanguageModelChat,
+  prompt: string,
+  signal: AbortSignal,
+): Promise<number> {
+  const source = new vscode.CancellationTokenSource();
+  const cancel = () => source.cancel();
+  signal.addEventListener("abort", cancel);
+  if (signal.aborted) source.cancel();
+  try {
+    return await model.countTokens(vscode.LanguageModelChatMessage.User(prompt), source.token);
+  } finally {
+    signal.removeEventListener("abort", cancel);
+    source.dispose();
+  }
+}
+
 async function sendToModel(
   model: vscode.LanguageModelChat,
   prompt: string,
@@ -738,6 +755,8 @@ async function handleAnalyze(
         maxInputTokens: chatModel.maxInputTokens,
       },
       signal,
+      countTokens: (prompt, promptSignal) =>
+        countModelTokens(chatModel, prompt, promptSignal),
       sendPrompt: (prompt, promptSignal) =>
         sendToModel(chatModel, prompt, promptSignal),
       onProgress: (text) => {
@@ -1217,6 +1236,7 @@ function getHtml(webview: vscode.Webview): string {
           ' · ' + result.model.name + ' · ' + new Date(result.createdAt).toLocaleString() +
           ' · ' + result.analyzedFiles + ' of ' + result.relevantFiles + ' files' +
           (result.modelCalls ? ' · ' + result.modelCalls + ' model calls' : '') + skipped +
+          (result.partialFiles && result.partialFiles.length ? ' · ' + result.partialFiles.length + ' partially analyzed' : '') +
           (result.guideCustomized ? ' · edited guide' : '');
         row.appendChild(info);
         const reports = result.reportFiles || { summary: result.reportFile };

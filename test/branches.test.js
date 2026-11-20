@@ -650,6 +650,7 @@ test('analysis sends only profile-relevant changes and stores the report', async
     guideCustomized: true,
     model: { id: 'fake', name: 'Fake model' },
     signal: new AbortController().signal,
+    countTokens: async prompt => prompt.length,
     sendPrompt: async prompt => { prompts.push(prompt); return `Report ${prompts.length}`; },
     onProgress() {},
     onStep: (step, status) => progress.push({ step, status })
@@ -661,7 +662,7 @@ test('analysis sends only profile-relevant changes and stores the report', async
   }
   assert.ok(prompts[0].includes('Custom guide'));
   assert.ok(prompts[1].includes('Custom guide'));
-  assert.ok(!prompts[2].includes('Custom guide'));
+  assert.ok(prompts[2].includes('Custom guide'));
   assert.ok(prompts[0].includes('summarizing'));
   assert.ok(prompts[1].includes('severity'));
   assert.ok(prompts[2].includes('code smells'));
@@ -697,6 +698,7 @@ test('analysis sends only profile-relevant changes and stores the report', async
     guideCustomized: false,
     model: { id: 'fake', name: 'Fake model' },
     signal: new AbortController().signal,
+    countTokens: async prompt => prompt.length,
     sendPrompt: async () => 'unused',
     onProgress() {}
   }), /No changed files match the Java profile/);
@@ -719,6 +721,7 @@ test('cancelling an analysis stops before saving a report', async t => {
     guideCustomized: false,
     model: { id: 'fake', name: 'Fake model' },
     signal: controller.signal,
+    countTokens: async prompt => prompt.length,
     sendPrompt: async () => { controller.abort(); return 'partial'; },
     onProgress() {}
   }), /Analysis cancelled/);
@@ -742,10 +745,93 @@ test('analysis refuses changes that exceed the model input window without sendin
     guideCustomized: false,
     model: { id: 'small', name: 'Small model', maxInputTokens: 1000 },
     signal: new AbortController().signal,
+    countTokens: async prompt => prompt.length,
     sendPrompt: async () => { sent++; return 'unused'; },
     onProgress() {}
   }), /too large for Small model in one request/);
   assert.equal(sent, 0);
+});
+
+test('analysis preserves hunk context and discloses incomplete coverage', async t => {
+  const { repo } = await fixture(t);
+  await rebuildBranchReview(repo, 'main', 'origin/feature/not-fetched', () => {});
+  const reviewDir = path.join(branchReviewRoot(repo), 'ai-review');
+  const changesFile = path.join(reviewDir, 'changed-files.json');
+  const manifestFile = path.join(reviewDir, 'manifest.json');
+  const changes = JSON.parse(await fs.readFile(changesFile, 'utf8'));
+  const manifest = JSON.parse(await fs.readFile(manifestFile, 'utf8'));
+  const original = changes.files[0];
+  const patch = '@@ -1,6 +1,6 @@\n unchanged 1\n unchanged 2\n unchanged 3\n unchanged 4\n-old\n+new\n';
+  await fs.writeFile(path.join(reviewDir, original.diffFile), patch);
+  changes.files.push(
+    { ...original, newPath: 'partial.txt', oldPath: 'partial.txt', diffTruncated: true },
+    { ...original, newPath: 'binary.txt', oldPath: 'binary.txt', binary: true },
+    { ...original, newPath: 'missing.txt', oldPath: 'missing.txt', diffFile: `files/${'0'.repeat(64)}.patch` },
+    { ...original, newPath: 'omitted.txt', oldPath: 'omitted.txt', diffFile: undefined, diffTruncated: true }
+  );
+  manifest.summary.changedFiles = changes.files.length;
+  await fs.writeFile(changesFile, JSON.stringify(changes));
+  await fs.writeFile(manifestFile, JSON.stringify(manifest));
+  const prompts = [];
+  const meta = await runAnalysis({
+    repoRoot: repo, profile: findAnalysisProfile('general-purpose'), guide: 'guide', guideCustomized: false,
+    model: { id: 'fake', name: 'Fake' }, signal: new AbortController().signal,
+    countTokens: async prompt => prompt.length,
+    sendPrompt: async prompt => { prompts.push(prompt); return 'result'; }, onProgress() {}
+  });
+  assert.ok(prompts.every(prompt => prompt.includes(patch)));
+  assert.equal(meta.relevantFiles, 5);
+  assert.equal(meta.analyzedFiles, 2);
+  assert.deepEqual(meta.skippedFiles, ['binary.txt', 'missing.txt', 'omitted.txt']);
+  assert.deepEqual(meta.partialFiles, ['partial.txt']);
+  assert.deepEqual((await listAnalysisResults(repo))[0].partialFiles, ['partial.txt']);
+  for (const file of Object.values(meta.reportFiles)) {
+    const report = await fs.readFile(path.join(resultsRoot(repo), file), 'utf8');
+    assert.match(report, /2 \(1 partial\)/);
+    for (const name of ['partial.txt', 'binary.txt', 'missing.txt', 'omitted.txt']) assert.ok(report.includes(name));
+  }
+});
+
+test('analysis counts every prompt before sending any model request', async t => {
+  const { repo } = await fixture(t);
+  await rebuildBranchReview(repo, 'main', 'origin/feature/not-fetched', () => {});
+  let counted = 0;
+  let sent = 0;
+  await assert.rejects(runAnalysis({
+    repoRoot: repo, profile: findAnalysisProfile('general-purpose'), guide: '?!😀', guideCustomized: true,
+    model: { id: 'fake', name: 'Fake', maxInputTokens: 10000 }, signal: new AbortController().signal,
+    countTokens: async () => ++counted === 3 ? 5001 : 100,
+    sendPrompt: async () => { sent++; return 'result'; }, onProgress() {}
+  }), /5001 tokens/);
+  assert.equal(counted, 3);
+  assert.equal(sent, 0);
+});
+
+test('cancellation during staging and publishing removes all output', async t => {
+  const { repo } = await fixture(t);
+  await rebuildBranchReview(repo, 'main', 'origin/feature/not-fetched', () => {});
+  for (const phase of ['staging', 'publishing', 'metadata']) {
+    const controller = new AbortController();
+    const rename = fs.rename;
+    fs.rename = async (source, destination) => {
+      await rename(source, destination);
+      if (phase === 'staging' && source.endsWith('.tmp') && destination.endsWith('.md')) controller.abort();
+      if (phase === 'publishing' && source.includes('.tmp-') && source.endsWith('.md')) controller.abort();
+      if (phase === 'metadata' && source.includes('.tmp-') && source.endsWith('.json')) controller.abort();
+    };
+    try {
+      await assert.rejects(runAnalysis({
+        repoRoot: repo, profile: findAnalysisProfile('general-purpose'), guide: 'guide', guideCustomized: false,
+        model: { id: 'fake', name: 'Fake' }, signal: controller.signal,
+        countTokens: async prompt => prompt.length, sendPrompt: async () => 'result', onProgress() {}
+      }), /Analysis cancelled/);
+    } finally {
+      fs.rename = rename;
+    }
+    assert.deepEqual(await listAnalysisResults(repo), []);
+    const folders = await fs.readdir(resultsRoot(repo));
+    for (const folder of folders) assert.deepEqual(await fs.readdir(path.join(resultsRoot(repo), folder)), []);
+  }
 });
 
 test('re-downloading the review keeps saved analysis results by default', async t => {
@@ -788,6 +874,7 @@ test('analysis sends all relevant files in three focused calls and saves three r
     guideCustomized: false,
     model: { id: 'fake', name: 'Fake model' },
     signal: new AbortController().signal,
+    countTokens: async prompt => prompt.length,
     sendPrompt: async prompt => { prompts.push(prompt); return 'single response'; },
     onProgress: text => progress.push(text)
   });
