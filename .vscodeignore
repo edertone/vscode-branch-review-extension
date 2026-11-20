@@ -1,6 +1,7 @@
 .vscode/**
 .vscode-test/**
 src/**
+!src/analysis-profiles/**
 test/**
 node_modules/**
 tsconfig.json

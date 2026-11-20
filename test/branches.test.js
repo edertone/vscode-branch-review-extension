@@ -14,8 +14,18 @@ const {
   readBranchReview,
   rebuildBranchReview
 } = require('../out/git');
-const { findAnalysisProfile } = require('../out/analysisProfiles');
+const { ANALYSIS_PROFILES, findAnalysisProfile, isRelevantToProfile } = require('../out/analysisProfiles');
 const { listAnalysisResults, resultsRoot, runAnalysis } = require('../out/analysis');
+
+test('analysis profiles provide default general-purpose and TypeScript guides with focused file matching', () => {
+  assert.equal(ANALYSIS_PROFILES[0].id, 'general-purpose');
+  assert.ok(findAnalysisProfile('general-purpose').guide.includes('any kind of software project'));
+  assert.ok(findAnalysisProfile('typescript').guide.includes('TypeScript engineer'));
+  assert.equal(isRelevantToProfile(findAnalysisProfile('general-purpose'), 'src/app.py'), true);
+  assert.equal(isRelevantToProfile(findAnalysisProfile('typescript'), 'src/app.ts'), true);
+  assert.equal(isRelevantToProfile(findAnalysisProfile('typescript'), 'src/app.java'), false);
+  assert.equal(isRelevantToProfile(findAnalysisProfile('typescript'), 'src/types.d.ts'), false);
+});
 
 function git(cwd, ...args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
