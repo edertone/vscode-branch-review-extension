@@ -301,13 +301,13 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
   const elements = new Map();
   function element(id) {
     return {
-      id, value: '', disabled: false, hidden: false, textContent: '', className: '', children: [],
+      id, value: '', disabled: false, hidden: false, textContent: '', className: '', children: [], dataset: {},
       listeners: {},
       addEventListener(type, callback) { this.listeners[type] = callback; },
       setAttribute(name, value) { this[name] = value; },
       getAttribute(name) { return this[name]; },
-      replaceChildren() { this.children = []; },
-      appendChild(child) { this.children.push(child); },
+      replaceChildren() { this.children = []; this.firstChild = undefined; },
+      appendChild(child) { this.children.push(child); if (!this.firstChild) this.firstChild = child; },
       focus() {}
     };
   }
@@ -316,8 +316,9 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
     'clear', 'refresh', 'chooseBranches', 'cancel', 'project', 'reviewSummary', 'status',
     'modalStatus', 'modalTitle', 'analysisTab', 'branchesTab', 'analysisPanel', 'branchesPanel',
     'reviewTabs', 'reviewDetails', 'changedFiles', 'noReview',
-    'selectionModal', 'form', 'analysisModel', 'analysisModelSearch', 'analysisModelCount', 'analysisProfile', 'analysisGuide', 'analyze',
-    'cancelAnalysis', 'resetGuide', 'analysisStatus', 'analysisResults'
+    'selectionModal', 'form', 'analysisModelInput', 'analysisModelCount', 'selectAnalysisModel', 'analysisModelDialog',
+    'analysisModelSearch', 'analysisModelList', 'analysisModelDialogStatus', 'cancelAnalysisModel', 'confirmAnalysisModel',
+    'analysisProfile', 'analysisGuide', 'analyze', 'cancelAnalysis', 'resetGuide', 'analysisStatus', 'analysisResults'
   ]) {
     elements.set(id, element(id));
   }
@@ -326,6 +327,8 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
   elements.get('noReview').hidden = false;
   elements.get('cancel').hidden = true;
   const outbound = [];
+  const globalStateValues = {};
+  let languageModels = [];
   let hostListener;
   let webviewListener;
   let editorListener;
@@ -399,7 +402,7 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
     },
     workspace: { createFileSystemWatcher: () => watcher },
     lm: {
-      selectChatModels: async () => [],
+      selectChatModels: async () => languageModels,
       onDidChangeChatModels: () => ({ dispose() {} })
     },
     RelativePattern: class {
@@ -428,7 +431,10 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
   extension.activate({
     subscriptions: [],
     workspaceState: { get: () => undefined, update: async () => {} },
-    globalState: { get: () => ({}), update: async () => {} }
+    globalState: {
+      get(key, fallback) { return globalStateValues[key] ?? fallback; },
+      async update(key, value) { globalStateValues[key] = value; }
+    }
   });
   t.after(() => viewDisposed?.());
   await command();
@@ -473,6 +479,11 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
   await rebuildBranchReview(repo, 'main', 'origin/feature/not-fetched', () => {});
   watcherEvents.change();
   await externalSync;
+  languageModels = [
+    { id: 'frequent', name: 'Frequent Model', vendor: 'vendor' },
+    { id: 'slow', name: 'Slow Model', vendor: 'vendor' },
+    { id: 'unused', name: 'Unused Model', vendor: 'vendor' }
+  ];
   webviewListener({ data: {
     type: 'analysisState',
     models: [
@@ -484,15 +495,26 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
     profiles: [],
     results: []
   } });
-  assert.deepEqual(elements.get('analysisModel').children.map(option => option.value), ['frequent', 'slow', 'unused']);
-  assert.equal(elements.get('analysisModel').value, 'slow');
+  assert.equal(elements.get('analysisModelInput').value, 'Slow Model (vendor)');
+  assert.equal(elements.get('analysisModelInput').dataset.modelId, 'slow');
+  elements.get('selectAnalysisModel').listeners.click();
+  assert.equal(elements.get('analysisModelDialog').hidden, false);
   elements.get('analysisModelSearch').value = 'frequent';
   elements.get('analysisModelSearch').listeners.input();
-  assert.deepEqual(elements.get('analysisModel').children.map(option => option.value), ['frequent']);
-  elements.get('analysisModelSearch').value = '';
-  elements.get('analysisModelSearch').listeners.input();
-  assert.deepEqual(elements.get('analysisModel').children.map(option => option.value), ['frequent', 'slow', 'unused']);
-  assert.equal(elements.get('analysisModel').value, 'frequent');
+  assert.deepEqual(elements.get('analysisModelList').children.map(item => item.firstChild.textContent), ['Frequent Model (vendor)']);
+  elements.get('analysisModelList').children[0].firstChild.listeners.click();
+  assert.equal(elements.get('confirmAnalysisModel').disabled, false);
+  elements.get('confirmAnalysisModel').listeners.click();
+  assert.equal(elements.get('analysisModelDialog').hidden, true);
+  assert.equal(elements.get('analysisModelInput').value, 'Frequent Model (vendor)');
+  assert.equal(elements.get('analysisModelInput').dataset.modelId, 'frequent');
+  assert.ok(outbound.some(message => message.type === 'selectAnalysisModel' && message.modelId === 'frequent'));
+  hostListener({ type: 'selectAnalysisModel', modelId: 'frequent' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(globalStateValues['branchReview.analysis.modelId'], 'frequent');
+  hostListener({ type: 'selectAnalysisModel', modelId: 'missing' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(globalStateValues['branchReview.analysis.modelId'], 'frequent');
   assert.equal(elements.get('selectionModal').hidden, true);
   assert.equal(elements.get('reviewSummary').hidden, false);
   assert.ok(elements.get('reviewSummary').textContent.includes('origin/feature/not-fetched'));

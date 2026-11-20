@@ -46,6 +46,7 @@ type WebviewMessage =
   | { type: "clear" }
   | { type: "analyze"; profileId: string; modelId: string; guide: string }
   | { type: "cancelAnalysis" }
+  | { type: "selectAnalysisModel"; modelId: string }
   | { type: "resetGuide"; profileId: string }
   | { type: "openResult"; id: string };
 
@@ -337,6 +338,8 @@ function resolveView(
         );
       } else if (message.type === "cancelAnalysis") {
         analysisController?.abort();
+      } else if (message.type === "selectAnalysisModel") {
+        void selectAnalysisModel(context, message.modelId);
       } else if (message.type === "resetGuide") {
         if (!findAnalysisProfile(message.profileId)) return;
         void context.workspaceState
@@ -571,6 +574,16 @@ async function listChatModels(): Promise<vscode.LanguageModelChat[]> {
   }
 }
 
+async function selectAnalysisModel(
+  context: vscode.ExtensionContext,
+  modelId: string,
+): Promise<void> {
+  if (typeof modelId !== "string" || !(await listChatModels()).some((model) => model.id === modelId)) {
+    return;
+  }
+  await context.globalState.update(MODEL_STATE_KEY, modelId);
+}
+
 async function buildAnalysisState(
   context: vscode.ExtensionContext,
   repoRoot: string,
@@ -593,7 +606,9 @@ async function buildAnalysisState(
         (left, right) =>
           right.usage - left.usage || left.name.localeCompare(right.name),
       ),
-    selectedModelId: context.workspaceState.get<string>(MODEL_STATE_KEY),
+    selectedModelId:
+      context.globalState.get<string>(MODEL_STATE_KEY) ??
+      context.workspaceState.get<string>(MODEL_STATE_KEY),
     profiles: ANALYSIS_PROFILES.map((profile) => ({
       id: profile.id,
       label: profile.label,
@@ -668,7 +683,7 @@ async function handleAnalyze(
   }
 
   const guideCustomized = guide.trim() !== profile.guide.trim();
-  await context.workspaceState.update(MODEL_STATE_KEY, chatModel.id);
+  await context.globalState.update(MODEL_STATE_KEY, chatModel.id);
   await context.workspaceState.update(
     guideStateKey(profile.id),
     guideCustomized ? guide : undefined,
@@ -794,9 +809,14 @@ function getHtml(webview: vscode.Webview): string {
     .modal-actions .secondary { margin-left: 0; }
     .modal-actions-end { display: flex; align-items: center; gap: 8px; }
     #analysisPanel select, #analysisPanel textarea, #analysisPanel input { margin-top: 4px; }
-    #analysisModelSearch { box-sizing: border-box; width: 100%; padding: 6px 8px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); }
-    #analysisModel { box-sizing: border-box; width: 100%; }
-    #analysisGuide { box-sizing: border-box; width: 100%; min-height: 120px; resize: vertical; padding: 6px 8px; font-family: var(--vscode-editor-font-family); font-size: 12px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); outline: none; }
+    #analysisModelRow { display: flex; gap: 8px; align-items: center; }
+    #analysisModelInput { flex: 1; min-width: 0; }
+    #selectAnalysisModel { flex: 0 0 auto; margin-top: 4px; }
+    #analysisModelDialog { z-index: 20; }
+    #analysisModelList { max-height: 45vh; overflow: auto; margin: 8px 0; padding: 0; list-style: none; }
+    .analysis-model-option { display: block; width: 100%; margin: 0; padding: 8px; text-align: left; background: transparent; color: var(--vscode-foreground); border: 1px solid transparent; }
+    .analysis-model-option:hover, .analysis-model-option[aria-selected="true"] { background: var(--vscode-list-hoverBackground); border-color: var(--vscode-focusBorder); }
+    #analysisGuide { box-sizing: border-box; width: 100%; min-height: 100px; resize: vertical; padding: 6px 8px; font-family: var(--vscode-editor-font-family); font-size: 12px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); outline: none; }
     #analysisGuide:focus { border-color: var(--vscode-focusBorder); }
     #analysisActions { display: flex; flex-wrap: wrap; gap: 8px; }
     #analysisActions button { margin: 12px 0 0; }
@@ -821,9 +841,11 @@ function getHtml(webview: vscode.Webview): string {
   <div id="reviewPanels">
     <section id="analysisPanel" role="tabpanel" aria-labelledby="analysisTab" tabindex="0" hidden>
       <h3>Analyze changes</h3>
-      <label for="analysisModelSearch">Search available AI models (most used first)</label>
-      <input id="analysisModelSearch" type="search" aria-label="Search available AI models" placeholder="Type to filter models" disabled>
-      <select id="analysisModel" aria-label="AI model" size="3" disabled></select>
+      <label for="analysisModelInput">AI model</label>
+      <div id="analysisModelRow">
+        <input id="analysisModelInput" aria-label="Selected AI model" placeholder="Select a model" readonly disabled>
+        <button id="selectAnalysisModel" class="secondary" type="button" disabled>Select model</button>
+      </div>
       <p id="analysisModelCount" class="muted" aria-live="polite"></p>
       <label for="analysisProfile">Code profile</label>
       <select id="analysisProfile" aria-label="Code profile" disabled></select>
@@ -846,6 +868,22 @@ function getHtml(webview: vscode.Webview): string {
   </div>
   <div id="noReview" class="muted">Checking .branchReview...</div>
   <div id="status" class="muted">Loading branches...</div>
+
+  <div id="analysisModelDialog" class="modal" role="dialog" aria-modal="true" aria-labelledby="analysisModelDialogTitle" hidden>
+    <div class="modal-content">
+      <h3 id="analysisModelDialogTitle">Select AI model</h3>
+      <label for="analysisModelSearch">Search models</label>
+      <input id="analysisModelSearch" type="search" placeholder="Search by model, provider, or ID" autocomplete="off">
+      <ul id="analysisModelList" aria-label="Available AI models"></ul>
+      <div class="modal-actions">
+        <div id="analysisModelDialogStatus" class="muted" aria-live="polite"></div>
+        <div class="modal-actions-end">
+          <button id="cancelAnalysisModel" class="secondary" type="button">Cancel</button>
+          <button id="confirmAnalysisModel" type="button" disabled>Select</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <div id="selectionModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle" hidden>
     <div class="modal-content">
@@ -899,9 +937,15 @@ function getHtml(webview: vscode.Webview): string {
     const targetBranches = document.getElementById('targetBranches');
     const status = document.getElementById('status');
     const modalStatus = document.getElementById('modalStatus');
-    const analysisModel = document.getElementById('analysisModel');
-    const analysisModelSearch = document.getElementById('analysisModelSearch');
+    const analysisModelInput = document.getElementById('analysisModelInput');
     const analysisModelCount = document.getElementById('analysisModelCount');
+    const selectAnalysisModelButton = document.getElementById('selectAnalysisModel');
+    const analysisModelDialog = document.getElementById('analysisModelDialog');
+    const analysisModelSearch = document.getElementById('analysisModelSearch');
+    const analysisModelList = document.getElementById('analysisModelList');
+    const analysisModelDialogStatus = document.getElementById('analysisModelDialogStatus');
+    const cancelAnalysisModelButton = document.getElementById('cancelAnalysisModel');
+    const confirmAnalysisModelButton = document.getElementById('confirmAnalysisModel');
     const analysisProfile = document.getElementById('analysisProfile');
     const analysisGuide = document.getElementById('analysisGuide');
     const analyzeButton = document.getElementById('analyze');
@@ -919,6 +963,7 @@ function getHtml(webview: vscode.Webview): string {
     let activeReviewTab = 'analysis';
     let analysisProfiles = [];
     let analysisModels = [];
+    let pendingAnalysisModelId = '';
     const analysisDrafts = {};
 
     function selectReviewTab(tab) {
@@ -1010,10 +1055,10 @@ function getHtml(webview: vscode.Webview): string {
 
     function updateAnalysisState() {
       const unavailable = isBusy || isLoading || isRefreshing || isAnalysisRunning;
-      const hasModel = analysisModels.length > 0 && analysisModel.value !== '';
+      const hasModel = analysisModels.some(model => model.id === analysisModelInput.dataset.modelId);
       const hasGuide = analysisGuide.value.trim() !== '';
-      analysisModel.disabled = unavailable || analysisModels.length === 0;
-      analysisModelSearch.disabled = unavailable || analysisModels.length === 0;
+      analysisModelInput.disabled = unavailable || analysisModels.length === 0;
+      selectAnalysisModelButton.disabled = unavailable || analysisModels.length === 0;
       analysisProfile.disabled = unavailable;
       analysisGuide.disabled = unavailable;
       resetGuideButton.disabled = unavailable;
@@ -1035,19 +1080,16 @@ function getHtml(webview: vscode.Webview): string {
     }
 
     function renderAnalysisState(state) {
-      const previousModel = analysisModel.value;
       analysisModels = state.models;
-      const preferredModel = [previousModel, state.selectedModelId]
-        .find(id => id && state.models.some(model => model.id === id)) ||
-        (state.models[0] ? state.models[0].id : '');
-      if (!analysisModelSearch.value) {
-        renderFilteredAnalysisModels(preferredModel);
-      } else {
-        renderFilteredAnalysisModels(analysisModel.value);
-      }
+      const previousSelectedModelId = analysisModelInput.dataset.modelId;
+      const previousModel = state.models.find(model => model.id === previousSelectedModelId);
+      const selectedModel = previousModel || state.models.find(model => model.id === state.selectedModelId);
+      analysisModelInput.dataset.modelId = selectedModel ? selectedModel.id : '';
+      analysisModelInput.value = selectedModel ? selectedModel.name + ' (' + selectedModel.vendor + ')' : '';
       analysisModelCount.textContent = state.models.length === 0
         ? 'No AI models available. Sign in to GitHub Copilot or another model provider.'
-        : state.models.length + ' available model' + (state.models.length === 1 ? '' : 's') + ' · sorted by analyses run';
+        : state.models.length + ' available model' + (state.models.length === 1 ? '' : 's');
+      renderAnalysisModelChoices();
 
       analysisProfiles = state.profiles;
       const previousProfile = analysisProfile.value;
@@ -1092,28 +1134,64 @@ function getHtml(webview: vscode.Webview): string {
       }
     }
 
-    function renderFilteredAnalysisModels(preferredId) {
+    function renderAnalysisModelChoices() {
       const query = analysisModelSearch.value.trim().toLocaleLowerCase();
-      const matchingModels = analysisModels.filter(model =>
+      const models = analysisModels.filter(model =>
         (model.name + ' ' + model.vendor + ' ' + model.id).toLocaleLowerCase().includes(query));
-      analysisModel.replaceChildren();
-      for (const model of matchingModels) {
-        const option = document.createElement('option');
-        option.value = model.id;
+      const selectedId = analysisModelInput.dataset.modelId;
+      analysisModelList.replaceChildren();
+      for (const model of models) {
+        const item = document.createElement('li');
+        const option = document.createElement('button');
+        option.type = 'button';
+        option.className = 'analysis-model-option';
         option.textContent = model.name + ' (' + model.vendor + ')';
-        analysisModel.appendChild(option);
+        option.setAttribute('aria-selected', String(model.id === pendingAnalysisModelId));
+        option.addEventListener('click', () => {
+          pendingAnalysisModelId = model.id;
+          confirmAnalysisModelButton.disabled = false;
+          for (const candidate of analysisModelList.children) {
+            candidate.firstChild.setAttribute('aria-selected', String(candidate.firstChild === option));
+          }
+        });
+        item.appendChild(option);
+        analysisModelList.appendChild(item);
       }
-      const selectedModel = matchingModels.find(model => model.id === preferredId) || matchingModels[0];
-      analysisModel.value = selectedModel ? selectedModel.id : '';
-      analysisModelCount.textContent = matchingModels.length === analysisModels.length
-        ? analysisModels.length + ' available model' + (analysisModels.length === 1 ? '' : 's') + ' · sorted by analyses run'
-        : matchingModels.length + ' of ' + analysisModels.length + ' models · sorted by analyses run';
-      updateAnalysisState();
+      analysisModelDialogStatus.textContent = models.length
+        ? models.length + ' model' + (models.length === 1 ? '' : 's') + (selectedId ? ' · currently selected model is highlighted' : '')
+        : 'No models match your search.';
+    }
+
+    function openAnalysisModelDialog() {
+      pendingAnalysisModelId = analysisModelInput.dataset.modelId || '';
+      analysisModelSearch.value = '';
+      confirmAnalysisModelButton.disabled = !pendingAnalysisModelId;
+      renderAnalysisModelChoices();
+      analysisModelDialog.hidden = false;
+      analysisModelSearch.focus();
+    }
+
+    function closeAnalysisModelDialog() {
+      analysisModelDialog.hidden = true;
+      selectAnalysisModelButton.focus();
     }
 
     analysisProfile.addEventListener('change', showProfileGuide);
-    analysisModel.addEventListener('change', updateAnalysisState);
-    analysisModelSearch.addEventListener('input', () => renderFilteredAnalysisModels(analysisModel.value));
+    selectAnalysisModelButton.addEventListener('click', openAnalysisModelDialog);
+    analysisModelSearch.addEventListener('input', renderAnalysisModelChoices);
+    cancelAnalysisModelButton.addEventListener('click', closeAnalysisModelDialog);
+    analysisModelDialog.addEventListener('click', event => {
+      if (event.target === analysisModelDialog) closeAnalysisModelDialog();
+    });
+    confirmAnalysisModelButton.addEventListener('click', () => {
+      const model = analysisModels.find(candidate => candidate.id === pendingAnalysisModelId);
+      if (!model) return;
+      analysisModelInput.dataset.modelId = model.id;
+      analysisModelInput.value = model.name + ' (' + model.vendor + ')';
+      vscode.postMessage({ type: 'selectAnalysisModel', modelId: model.id });
+      closeAnalysisModelDialog();
+      updateAnalysisState();
+    });
     analysisGuide.addEventListener('input', () => {
       const profile = currentAnalysisProfile();
       if (profile) {
@@ -1131,7 +1209,7 @@ function getHtml(webview: vscode.Webview): string {
       vscode.postMessage({
         type: 'analyze',
         profileId: profile.id,
-        modelId: analysisModel.value,
+        modelId: analysisModelInput.dataset.modelId,
         guide: analysisGuide.value,
       });
     });
