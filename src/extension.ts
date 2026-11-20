@@ -48,7 +48,11 @@ type WebviewMessage =
   | { type: "cancelAnalysis" }
   | { type: "selectAnalysisModel"; modelId: string }
   | { type: "resetGuide"; profileId: string }
-  | { type: "openResult"; id: string; reportKind?: "summary" | "bugs" | "codeSmells" };
+  | {
+      type: "openResult";
+      id: string;
+      reportKind?: "summary" | "bugs" | "codeSmells";
+    };
 
 let output: vscode.OutputChannel | undefined;
 
@@ -347,7 +351,11 @@ function resolveView(
           .then(postAnalysisState);
       } else if (message.type === "openResult") {
         if (currentRepo) {
-          void openAnalysisReport(currentRepo.rootUri.fsPath, message.id, message.reportKind);
+          void openAnalysisReport(
+            currentRepo.rootUri.fsPath,
+            message.id,
+            message.reportKind,
+          );
         }
       } else if (message.type === "analyze" && busy) {
         void webview.postMessage({
@@ -578,7 +586,10 @@ async function selectAnalysisModel(
   context: vscode.ExtensionContext,
   modelId: string,
 ): Promise<void> {
-  if (typeof modelId !== "string" || !(await listChatModels()).some((model) => model.id === modelId)) {
+  if (
+    typeof modelId !== "string" ||
+    !(await listChatModels()).some((model) => model.id === modelId)
+  ) {
     return;
   }
   await context.globalState.update(MODEL_STATE_KEY, modelId);
@@ -747,14 +758,22 @@ async function openAnalysisReport(
     return;
   }
   try {
-    const result = (await listAnalysisResults(repoRoot)).find((entry) => entry.id === id);
+    const result = (await listAnalysisResults(repoRoot)).find(
+      (entry) => entry.id === id,
+    );
     if (!result) {
-      vscode.window.showErrorMessage("Branch Review: analysis report not found.");
+      vscode.window.showErrorMessage(
+        "Branch Review: analysis report not found.",
+      );
       return;
     }
-    const reportFile = result.reportFiles?.[reportKind] ?? (reportKind === "summary" ? result.reportFile : undefined);
+    const reportFile =
+      result.reportFiles?.[reportKind] ??
+      (reportKind === "summary" ? result.reportFile : undefined);
     if (!reportFile) {
-      vscode.window.showErrorMessage("Branch Review: requested report is not available.");
+      vscode.window.showErrorMessage(
+        "Branch Review: requested report is not available.",
+      );
       return;
     }
     const reportPath = path.join(resultsRoot(repoRoot), reportFile);
@@ -830,7 +849,7 @@ function getHtml(webview: vscode.Webview): string {
     #analysisModelList { max-height: 45vh; overflow: auto; margin: 8px 0; padding: 0; list-style: none; }
     .analysis-model-option { display: block; width: 100%; margin: 0; padding: 8px; text-align: left; background: transparent; color: var(--vscode-foreground); border: 1px solid transparent; }
     .analysis-model-option:hover, .analysis-model-option[aria-selected="true"] { background: var(--vscode-list-hoverBackground); border-color: var(--vscode-focusBorder); }
-    #analysisGuide { box-sizing: border-box; width: 100%; min-height: 100px; resize: vertical; padding: 6px 8px; font-family: var(--vscode-editor-font-family); font-size: 12px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); outline: none; }
+    #analysisGuide { box-sizing: border-box; width: 100%; min-height: 150px; resize: vertical; padding: 6px 8px; font-family: var(--vscode-editor-font-family); font-size: 12px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); outline: none; }
     #analysisGuide:focus { border-color: var(--vscode-focusBorder); }
     #analysisActions { display: flex; flex-wrap: wrap; gap: 8px; }
     #analysisActions button { margin: 12px 0 0; }

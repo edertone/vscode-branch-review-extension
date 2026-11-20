@@ -2,7 +2,7 @@
   "name": "branch-review",
   "displayName": "Branch Review",
   "description": "Download two git branches into .branchReview/ for side-by-side review.",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "publisher": "local-dev",
   "private": true,
   "license": "MIT",
@@ -44,8 +44,9 @@
     }
   },
   "scripts": {
-    "build": "npm install && npm run compile && npm run package",
+    "build": "npm install && npm run compile && npm test && npm run package",
     "compile": "tsc -p ./",
+    "test": "node --test",
     "watch": "tsc -watch -p ./",
     "package": "vsce package --allow-missing-repository",
     "vscode:prepublish": "npm run compile"
