@@ -149,6 +149,11 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
   let hostListener;
   let webviewListener;
   let editorListener;
+  let repositoryOpenListener;
+  let repositoryListenerReady;
+  const repositoryListenerRegistered = new Promise(resolve => {
+    repositoryListenerReady = resolve;
+  });
   let nextMessage;
   let initialized;
   const init = new Promise(resolve => { initialized = resolve; });
@@ -180,15 +185,23 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
   };
   let command;
   let focusCount = 0;
+  const repositories = [
+    { rootUri: { fsPath: repo }, state: { HEAD: { name: 'main' } } },
+    { rootUri: { fsPath: seed }, state: { HEAD: { name: 'feature/not-fetched' } } }
+  ];
   const vscode = {
     extensions: { getExtension: () => ({ isActive: true, exports: { getAPI: () => ({
-      repositories: [
-        { rootUri: { fsPath: repo }, state: { HEAD: { name: 'main' } } },
-        { rootUri: { fsPath: seed }, state: { HEAD: { name: 'feature/not-fetched' } } }
-      ]
+      repositories,
+      onDidOpenRepository(callback) {
+        repositoryOpenListener = callback;
+        repositoryListenerReady();
+        return { dispose() {} };
+      }
     }) } }) },
     window: {
+      activeTextEditor: { document: { uri: { fsPath: path.join(repo, 'file.txt') } } },
       createOutputChannel: () => ({ appendLine() {}, dispose() {} }),
+      showErrorMessage() {},
       registerWebviewViewProvider(id, provider, options) {
         assert.equal(id, 'branchReview.view');
         assert.equal(options.webviewOptions.retainContextWhenHidden, true);
@@ -226,6 +239,7 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
   await command();
   await command();
   assert.equal(focusCount, 2);
+  repositories.length = 0;
   assert.match(webview.html, /<select id="baselineBranches"/);
   assert.match(webview.html, /<select id="targetBranches"/);
   const script = webview.html.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/)[1];
@@ -240,7 +254,16 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
     },
     window: { addEventListener(type, callback) { webviewListener = callback; } }
   });
-  const message = await init;
+  const initialMessage = await init;
+  assert.equal(initialMessage.type, 'initError');
+  repositories.push(
+    { rootUri: { fsPath: repo }, state: { HEAD: { name: 'main' } } },
+    { rootUri: { fsPath: seed }, state: { HEAD: { name: 'feature/not-fetched' } } }
+  );
+  await repositoryListenerRegistered;
+  const startupInit = new Promise(resolve => { nextMessage = { type: 'init', resolve }; });
+  repositoryOpenListener(repositories[0]);
+  const message = await startupInit;
   assert.equal(message.type, 'init');
   assert.equal(elements.get('project').textContent, 'Project: repo');
   assert.equal(elements.get('project').title, repo);

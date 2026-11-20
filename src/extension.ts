@@ -19,6 +19,7 @@ interface GitRepository {
 
 interface GitApi {
   repositories: GitRepository[];
+  onDidOpenRepository(listener: (repository: GitRepository) => void): vscode.Disposable;
 }
 
 interface GitExtensionExports {
@@ -210,6 +211,42 @@ function resolveView(
     );
   });
   viewSubscriptions.push(editorListener);
+  void getGitApi().then(
+    (api) => {
+      if (disposed || !api) return;
+      viewSubscriptions.push(
+        api.onDidOpenRepository((repository) => {
+          const activeFile = vscode.window.activeTextEditor?.document.uri.fsPath;
+          if (currentRepo &&
+              (!activeFile ||
+                (activeFile !== repository.rootUri.fsPath &&
+                  !activeFile.startsWith(repository.rootUri.fsPath + path.sep)))) {
+            return;
+          }
+          const selectedEditorRevision = ++editorRevision;
+          void findRepository(activeFile).then(
+            (selectedRepo) => {
+              if (!disposed && selectedEditorRevision === editorRevision && selectedRepo) {
+                selectRepository(selectedRepo);
+              }
+            },
+            (err: Error) => {
+              output?.appendLine(`Error selecting repository: ${err.message}`);
+              vscode.window.showErrorMessage(
+                `Branch Review: unable to select repository: ${err.message}`,
+              );
+            },
+          );
+        }),
+      );
+    },
+    (err: Error) => {
+      output?.appendLine(`Error watching Git repositories: ${err.message}`);
+      vscode.window.showErrorMessage(
+        `Branch Review: unable to watch Git repositories: ${err.message}`,
+      );
+    },
+  );
 
   viewSubscriptions.push(
     currentView.onDidChangeVisibility(() => {
