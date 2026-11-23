@@ -44,7 +44,7 @@
     }
   },
   "scripts": {
-    "build": "npm install && npm run compile && npm test && npm run package",
+    "build": "npm ci && npm run compile && npm test && npm run package",
     "compile": "tsc -p ./",
     "test": "node --test",
     "watch": "tsc -watch -p ./",
