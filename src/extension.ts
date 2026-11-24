@@ -44,7 +44,13 @@ type WebviewMessage =
   | { type: "refresh" }
   | { type: "download"; baseline: string; target: string }
   | { type: "clear" }
-  | { type: "analyze"; profileId: string; modelId: string; guide: string }
+  | {
+      type: "analyze";
+      profileId: string;
+      modelId: string;
+      guide: string;
+      includeSolutionReview?: boolean;
+    }
   | { type: "cancelAnalysis" }
   | {
       type: "analysisStep";
@@ -57,7 +63,7 @@ type WebviewMessage =
   | {
       type: "openResult";
       id: string;
-      reportKind?: "summary" | "bugs" | "codeSmells";
+      reportKind?: "summary" | "bugs" | "codeSmells" | "solutionReview";
     };
 
 let output: vscode.OutputChannel | undefined;
@@ -556,7 +562,8 @@ async function handleDownload(
         "Saved analysis results already exist for the downloaded branches.",
         {
           modal: true,
-          detail: "Delete the existing analysis results when downloading the selected branches again?",
+          detail:
+            "Delete the existing analysis results when downloading the selected branches again?",
         },
         "Delete Results",
         "Keep Results",
@@ -666,7 +673,10 @@ async function countModelTokens(
   signal.addEventListener("abort", cancel);
   if (signal.aborted) source.cancel();
   try {
-    return await model.countTokens(vscode.LanguageModelChatMessage.User(prompt), source.token);
+    return await model.countTokens(
+      vscode.LanguageModelChatMessage.User(prompt),
+      source.token,
+    );
   } finally {
     signal.removeEventListener("abort", cancel);
     source.dispose();
@@ -750,6 +760,7 @@ async function handleAnalyze(
       profile,
       guide,
       guideCustomized,
+      includeSolutionReview: message.includeSolutionReview === true,
       model: {
         id: chatModel.id,
         name: chatModel.name,
@@ -795,7 +806,7 @@ async function handleAnalyze(
 async function openAnalysisReport(
   repoRoot: string,
   id: string,
-  reportKind: "summary" | "bugs" | "codeSmells" = "summary",
+  reportKind: "summary" | "bugs" | "codeSmells" | "solutionReview" = "summary",
 ): Promise<void> {
   if (!RESULT_ID_PATTERN.test(id)) {
     vscode.window.showErrorMessage(
@@ -897,6 +908,8 @@ function getHtml(webview: vscode.Webview): string {
     .analysis-model-option:hover, .analysis-model-option[aria-selected="true"] { background: var(--vscode-list-hoverBackground); border-color: var(--vscode-focusBorder); }
     #analysisGuide { box-sizing: border-box; width: 100%; min-height: 150px; resize: vertical; padding: 6px 8px; font-family: var(--vscode-editor-font-family); font-size: 12px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); outline: none; }
     #analysisGuide:focus { border-color: var(--vscode-focusBorder); }
+    .checkbox-label { display: flex; align-items: flex-start; gap: 6px; margin-top: 12px; }
+    .checkbox-label input { flex: 0 0 14px; width: 14px; height: 14px; margin: 2px 0 0 !important; }
     #analysisActions { display: flex; flex-wrap: wrap; gap: 8px; }
     #analysisActions button { margin: 12px 0 0; }
     #analysisStatus { margin-top: 12px; white-space: pre-wrap; font-size: 12px; }
@@ -937,6 +950,7 @@ function getHtml(webview: vscode.Webview): string {
       <select id="analysisProfile" aria-label="Code profile" disabled></select>
       <label for="analysisGuide">Analysis guide for this profile (editable)</label>
       <textarea id="analysisGuide" spellcheck="false" disabled></textarea>
+      <label class="checkbox-label"><input id="includeSolutionReview" type="checkbox" disabled> Assess whether the solution is correct. Generate report with better approach if not</label>
       <div id="analysisActions">
         <button id="analyze" type="button" disabled>Analyze</button>
         <button id="resetGuide" class="secondary" type="button" disabled>Restore default guide</button>
@@ -965,6 +979,7 @@ function getHtml(webview: vscode.Webview): string {
         <li data-step="summary"><span class="analysis-step-indicator" aria-hidden="true">○</span><span>Generate summary and analysis report</span><span class="analysis-step-detail" aria-live="polite"></span></li>
         <li data-step="bugs"><span class="analysis-step-indicator" aria-hidden="true">○</span><span>Find and sort bugs by severity</span><span class="analysis-step-detail" aria-live="polite"></span></li>
         <li data-step="codeSmells"><span class="analysis-step-indicator" aria-hidden="true">○</span><span>Identify code smells</span><span class="analysis-step-detail" aria-live="polite"></span></li>
+        <li data-step="solutionReview" hidden><span class="analysis-step-indicator" aria-hidden="true">○</span><span>Assess solution correctness and a better approach</span><span class="analysis-step-detail" aria-live="polite"></span></li>
         <li data-step="save"><span class="analysis-step-indicator" aria-hidden="true">○</span><span>Save all reports</span><span class="analysis-step-detail" aria-live="polite"></span></li>
       </ul>
       <div id="analysisProgressActions">
@@ -1054,6 +1069,7 @@ function getHtml(webview: vscode.Webview): string {
     const confirmAnalysisModelButton = document.getElementById('confirmAnalysisModel');
     const analysisProfile = document.getElementById('analysisProfile');
     const analysisGuide = document.getElementById('analysisGuide');
+    const includeSolutionReview = document.getElementById('includeSolutionReview');
     const analyzeButton = document.getElementById('analyze');
     const resetGuideButton = document.getElementById('resetGuide');
     const analysisStatus = document.getElementById('analysisStatus');
@@ -1183,6 +1199,7 @@ function getHtml(webview: vscode.Webview): string {
       selectAnalysisModelButton.disabled = unavailable || analysisModels.length === 0;
       analysisProfile.disabled = unavailable;
       analysisGuide.disabled = unavailable;
+      includeSolutionReview.disabled = unavailable;
       resetGuideButton.disabled = unavailable;
       analyzeButton.disabled = unavailable || !hasValidReview || !hasModel || !hasGuide;
     }
@@ -1243,7 +1260,7 @@ function getHtml(webview: vscode.Webview): string {
           (result.guideCustomized ? ' · edited guide' : '');
         row.appendChild(info);
         const reports = result.reportFiles || { summary: result.reportFile };
-        for (const [kind, label] of [['summary', 'Summary'], ['bugs', 'Bugs by severity'], ['codeSmells', 'Code smells']]) {
+        for (const [kind, label] of [['summary', 'Summary'], ['bugs', 'Bugs by severity'], ['codeSmells', 'Code smells'], ['solutionReview', 'Solution correctness']]) {
           if (!reports[kind]) continue;
           const open = document.createElement('button');
           open.className = 'secondary';
@@ -1357,6 +1374,11 @@ function getHtml(webview: vscode.Webview): string {
       }
       updateAnalysisState();
     });
+    includeSolutionReview.addEventListener('change', () => {
+      const step = Array.from(analysisProgressSteps.children)
+        .find(item => item.getAttribute('data-step') === 'solutionReview');
+      if (step) step.hidden = !includeSolutionReview.checked;
+    });
     analyzeButton.addEventListener('click', () => {
       const profile = currentAnalysisProfile();
       if (!profile || analyzeButton.disabled) {
@@ -1364,6 +1386,9 @@ function getHtml(webview: vscode.Webview): string {
       }
       const selectedModel = analysisModels.find(model => model.id === analysisModelInput.dataset.modelId);
       analysisProgressTitle.textContent = 'Analyzing changes with ' + (selectedModel ? selectedModel.name : 'selected model');
+      const solutionReviewStep = Array.from(analysisProgressSteps.children)
+        .find(item => item.getAttribute('data-step') === 'solutionReview');
+      if (solutionReviewStep) solutionReviewStep.hidden = !includeSolutionReview.checked;
       analysisStatus.className = 'muted';
       analysisStatus.textContent = 'Starting analysis...';
       resetAnalysisProgress();
@@ -1373,6 +1398,7 @@ function getHtml(webview: vscode.Webview): string {
         profileId: profile.id,
         modelId: analysisModelInput.dataset.modelId,
         guide: analysisGuide.value,
+        includeSolutionReview: includeSolutionReview.checked,
       });
     });
     cancelAnalysisDialogButton.addEventListener('click', cancelAnalysis);

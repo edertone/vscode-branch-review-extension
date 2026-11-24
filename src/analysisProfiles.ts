@@ -1,7 +1,7 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
-export type AnalysisProfileId = 'general-purpose' | 'typescript' | 'java' | 'angular';
+export type AnalysisProfileId = 'general-purpose' | 'typescript' | 'java' | 'angular' | 'playwright';
 
 export interface AnalysisProfile {
   id: AnalysisProfileId;
@@ -88,6 +88,20 @@ export const ANALYSIS_PROFILES: readonly AnalysisProfile[] = [
     exclude: [
       /(^|\/)(node_modules|dist|coverage|\.angular)\//,
       /\.min\.(js|css)$/i,
+    ],
+  },
+  {
+    id: 'playwright',
+    label: 'Playwright',
+    guide: loadGuide('playwright.md'),
+    include: [
+      /(^|\/)(?:tests?|specs?|e2e|playwright|fixtures|pages|page-objects|support|helpers)\/.*\.(?:[cm]?[jt]sx?)$/i,
+      /(^|\/)playwright(?:-[^/]+)?\.config\.[cm]?[jt]sx?$/i,
+      /(^|\/)(package\.json|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?)$/i,
+    ],
+    exclude: [
+      /(^|\/)(node_modules|dist|coverage|out|test-results|playwright-report|blob-report)\//,
+      /\.d\.ts$/i,
     ],
   },
 ];

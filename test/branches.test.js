@@ -27,6 +27,19 @@ test('analysis profiles provide default general-purpose and TypeScript guides wi
   assert.equal(isRelevantToProfile(findAnalysisProfile('typescript'), 'src/types.d.ts'), false);
 });
 
+test('Playwright profile reviews test files and configuration, not generated artifacts', () => {
+  const profile = findAnalysisProfile('playwright');
+  assert.ok(profile);
+  assert.ok(profile.guide.includes('Playwright test engineer'));
+  assert.equal(isRelevantToProfile(profile, 'tests/login.spec.ts'), true);
+  assert.equal(isRelevantToProfile(profile, 'e2e/checkout.test.js'), true);
+  assert.equal(isRelevantToProfile(profile, 'playwright.config.ts'), true);
+  assert.equal(isRelevantToProfile(profile, 'package.json'), true);
+  assert.equal(isRelevantToProfile(profile, 'src/application.ts'), false);
+  assert.equal(isRelevantToProfile(profile, 'node_modules/@playwright/test/index.js'), false);
+  assert.equal(isRelevantToProfile(profile, 'playwright-report/index.html'), false);
+});
+
 function git(cwd, ...args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
@@ -330,7 +343,7 @@ test('webview initializes, shares branch suggestions, and accepts typed names', 
     'reviewTabs', 'reviewDetails', 'changedFiles', 'noReview',
     'selectionModal', 'form', 'analysisModelInput', 'selectAnalysisModel', 'analysisModelDialog',
     'analysisModelSearch', 'analysisModelList', 'analysisModelDialogStatus', 'cancelAnalysisModel', 'confirmAnalysisModel',
-    'analysisProfile', 'analysisGuide', 'analyze', 'resetGuide', 'analysisStatus', 'analysisResults', 'analysisProgressDialog', 'analysisProgressMessage', 'analysisProgressSteps', 'cancelAnalysisDialog', 'closeAnalysisDialog', 'analysisActions'
+    'analysisProfile', 'analysisGuide', 'includeSolutionReview', 'analyze', 'resetGuide', 'analysisStatus', 'analysisResults', 'analysisProgressDialog', 'analysisProgressMessage', 'analysisProgressSteps', 'cancelAnalysisDialog', 'closeAnalysisDialog', 'analysisActions'
   ]) {
     elements.set(id, element(id));
   }
@@ -702,6 +715,42 @@ test('analysis sends only profile-relevant changes and stores the report', async
     sendPrompt: async () => 'unused',
     onProgress() {}
   }), /No changed files match the Java profile/);
+});
+
+test('analysis optionally assesses solution correctness and saves its own report', async t => {
+  const { repo, seed } = await fixture(t);
+  await fs.mkdir(path.join(seed, 'src'), { recursive: true });
+  await fs.writeFile(path.join(seed, 'src', 'app.component.ts'), 'export class App {}\n');
+  git(seed, 'add', 'src');
+  git(seed, 'commit', '-m', 'add component');
+  git(seed, 'push', 'origin', 'feature/not-fetched');
+  await rebuildBranchReview(repo, 'main', 'origin/feature/not-fetched', () => {});
+
+  const prompts = [];
+  const meta = await runAnalysis({
+    repoRoot: repo,
+    profile: findAnalysisProfile('angular'),
+    guide: 'guide',
+    guideCustomized: false,
+    includeSolutionReview: true,
+    model: { id: 'fake', name: 'Fake model' },
+    signal: new AbortController().signal,
+    countTokens: async prompt => prompt.length,
+    sendPrompt: async prompt => { prompts.push(prompt); return 'Correctness assessment'; },
+    onProgress() {}
+  });
+
+  assert.equal(prompts.length, 4);
+  assert.match(prompts[3], /Assess whether the proposed implementation/);
+  assert.match(prompts[3], /objectively better solution/);
+  assert.equal(meta.modelCalls, 4);
+  assert.match(meta.reportFiles.solutionReview, /-solutionReview\.md$/);
+  assert.match(
+    await fs.readFile(path.join(resultsRoot(repo), meta.reportFiles.solutionReview), 'utf8'),
+    /Correctness assessment/
+  );
+  const saved = (await listAnalysisResults(repo)).find(result => result.id === meta.id);
+  assert.equal(saved.reportFiles.solutionReview, meta.reportFiles.solutionReview);
 });
 
 test('cancelling an analysis stops before saving a report', async t => {
